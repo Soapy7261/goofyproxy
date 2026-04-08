@@ -2,6 +2,7 @@
 abstraction for data transfer through goofy ahh channels
 """
 
+import socket
 import base64
 import gzip
 from pathlib import Path
@@ -61,7 +62,38 @@ class GoofyIo:
         self._send(data)
 
 
+class SocketIo(GoofyIo):
+    """
+    a not so `GoofyIo` that uses a socket to transfer data. useful for testing
+    or debugging.
+    """
+
+    sock: socket.socket
+
+    def __init__(self, sock: socket.socket):
+        self.sock = sock
+
+    def _receive(self, size: int) -> bytes:
+        buf = b""
+        while len(buf) < size:
+            chunk = self.sock.recv(size - len(buf))
+            if not chunk:
+                raise EOFError(
+                    "connection closed before enough data was received"
+                )
+            buf += chunk
+        return buf
+
+    def _send(self, data: bytes):
+        self.sock.sendall(data)
+
+
 class TxtFileIo(GoofyIo):
+    """
+    a `GoofyIo` that creates and reads .txt files with base85 encoding and gzip
+    compression to transfer data.
+    """
+
     session_id: str
     send_as_id: str
     receive_from_id: str

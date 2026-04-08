@@ -2,11 +2,42 @@ from pathlib import Path
 import argparse
 from enum import StrEnum
 from typing import Self
+import socket
 
 from goofy_client import GoofyClient
 from goofy_server import GoofyServer
-from goofyio import TxtFileIo
+from goofyio import SocketIo
 from common import *
+
+
+def run(args: argparse.Namespace):
+    if args.mode == "s":
+        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(("127.0.0.1", 50505))
+        server_sock.listen(1)
+        client_sock, client_addr = server_sock.accept()
+
+        GoofyServer(
+            SocketIo(client_sock),
+            log_level=LOG_CONFIG["level"]
+        )
+    elif args.mode == "c":
+        if not args.port:
+            print("port is required in client mode")
+            return
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", 50505))
+
+        GoofyClient(
+            SocketIo(sock),
+            host="0.0.0.0",
+            port=args.port,
+            log_level=LOG_CONFIG["level"]
+        )
+    else:
+        print("invalid mode")
 
 
 class LogLevel(StrEnum):
@@ -84,11 +115,9 @@ def main():
     # parse
     args = parser.parse_args()
 
-    # process
-
+    # logging settings
     LOG_CONFIG["level"] = args.log_level.to_int()
     LOG_CONFIG["colorize"] = not args.no_color
-
     if args.log_file:
         try:
             f = open(args.log_file, "a")
@@ -97,34 +126,15 @@ def main():
             logger.fatal(f"failed to open log file: {format_exception(e)}")
             return
 
+    # run
     try:
-        channel_dir = Path(__file__).parent / "stuff" / "TxtFileIo"
-        if args.mode == "s":
-            gio = TxtFileIo("flamingo", "s", "c", channel_dir)
-            GoofyServer(gio, log_level=LOG_CONFIG["level"])
-        elif args.mode == "c":
-            if not args.port:
-                print("port is required in client mode")
-                return
-
-            gio = TxtFileIo("flamingo", "c", "s", channel_dir)
-            GoofyClient(
-                gio,
-                host="0.0.0.0",
-                port=args.port,
-                log_level=LOG_CONFIG["level"]
-            )
-        else:
-            print("invalid mode")
+        run(args)
     except BaseException as e:
+        logger.fatal(format_exception(e))
+    finally:
         if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
             LOG_CONFIG["file"].flush()
             LOG_CONFIG["file"].close()
-        raise e
-
-    if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
-        LOG_CONFIG["file"].flush()
-        LOG_CONFIG["file"].close()
 
 
 if __name__ == "__main__":
