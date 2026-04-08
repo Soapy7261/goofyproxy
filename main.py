@@ -70,6 +70,12 @@ def main():
         help="one of: debug, info, warning, error, fatal"
     )
     parser.add_argument(
+        "-f",
+        "--log-file",
+        type=str,
+        help="optional path to a log file, e.g. 'log.txt'"
+    )
+    parser.add_argument(
         "--no-color",
         action="store_true",
         help="disable terminal colors"
@@ -83,24 +89,42 @@ def main():
     LOG_CONFIG["level"] = args.log_level.to_int()
     LOG_CONFIG["colorize"] = not args.no_color
 
-    channel_dir = Path(__file__).parent / "stuff" / "TxtFileIo"
-    if args.mode == "s":
-        io = TxtFileIo("flamingo", "s", "c", channel_dir)
-        GoofyServer(io, log_level=LOG_CONFIG["level"])
-    elif args.mode == "c":
-        if not args.port:
-            print("port is required in client mode")
+    if args.log_file:
+        try:
+            f = open(args.log_file, "a")
+            LOG_CONFIG["file"] = f
+        except Exception as e:
+            logger.fatal(f"failed to open log file: {format_exception(e)}")
             return
 
-        io = TxtFileIo("flamingo", "c", "s", channel_dir)
-        GoofyClient(
-            io,
-            host="0.0.0.0",
-            port=args.port,
-            log_level=LOG_CONFIG["level"]
-        )
-    else:
-        print("invalid mode")
+    try:
+        channel_dir = Path(__file__).parent / "stuff" / "TxtFileIo"
+        if args.mode == "s":
+            gio = TxtFileIo("flamingo", "s", "c", channel_dir)
+            GoofyServer(gio, log_level=LOG_CONFIG["level"])
+        elif args.mode == "c":
+            if not args.port:
+                print("port is required in client mode")
+                return
+
+            gio = TxtFileIo("flamingo", "c", "s", channel_dir)
+            GoofyClient(
+                gio,
+                host="0.0.0.0",
+                port=args.port,
+                log_level=LOG_CONFIG["level"]
+            )
+        else:
+            print("invalid mode")
+    except BaseException as e:
+        if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
+            LOG_CONFIG["file"].flush()
+            LOG_CONFIG["file"].close()
+        raise e
+
+    if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
+        LOG_CONFIG["file"].flush()
+        LOG_CONFIG["file"].close()
 
 
 if __name__ == "__main__":

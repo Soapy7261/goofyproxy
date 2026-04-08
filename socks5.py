@@ -2,9 +2,6 @@
 fully functioning SOCKS5 server (RFC 1928 / RFC 1929).
 only used as a reference in this project.
 
-frankly, it's AI-generated but I've read and modified it (for hours) to fit my
-style.
-
 supports:
   - CONNECT: standard TCP proxying
   - BIND: inbound TCP connection brokering
@@ -127,10 +124,8 @@ class Socks5Server:
                     daemon=True,
                 )
                 t.start()
-        except KeyboardInterrupt:
-            self.log.info("received keyboard interrupt, shutting down")
-        except Exception as e:
-            self.log.error(format_exception(e))
+        except BaseException as e:
+            self.log.fatal(format_exception(e))
         finally:
             self.stop()
 
@@ -154,7 +149,7 @@ class Socks5Server:
 
             # call the appropriate command handler
 
-            cmd, atyp, dst_addr, dst_port = self._read_request(client)
+            cmd, atyp, dst_host, dst_port = self._read_request(client)
 
             if cmd == CMD_CONNECT:
                 cmd_name = "CONNECT"
@@ -166,19 +161,19 @@ class Socks5Server:
                 cmd_name = f"{cmd} (unsupported)"
 
             self.log.info(
-                f"command {cmd_name}, dest: {dst_addr}:{dst_port}"
+                f"command {cmd_name}, dest: {dst_host}:{dst_port}"
             )
 
             if cmd == CMD_CONNECT:
-                self._cmd_connect(client, atyp, dst_addr, dst_port)
+                self._cmd_connect(client, atyp, dst_host, dst_port)
             elif cmd == CMD_BIND:
-                self._cmd_bind(client, atyp, dst_addr, dst_port)
+                self._cmd_bind(client, atyp, dst_host, dst_port)
             elif cmd == CMD_UDP_ASSOCIATE:
-                self._cmd_udp_associate(client, atyp, dst_addr, dst_port)
+                self._cmd_udp_associate(client, atyp, dst_host, dst_port)
             else:
                 self._send_error(client, REP_CMD_NOT_SUPPORTED)
         except Exception as e:
-            self.log.warning(format_exception(e))
+            self.log.error(format_exception(e))
         finally:
             close_socket(client)
 
@@ -222,7 +217,7 @@ class Socks5Server:
         self, client: socket.socket
     ) -> tuple[int, int, str, int]:
         """
-        parse a SOCKS5 request and return (cmd, atyp, dst_addr, dst_port).
+        parse a SOCKS5 request and return (cmd, atyp, dst_host, dst_port).
 
         request structure:
             +-----+-----+-------+------+----------+----------+
@@ -237,26 +232,26 @@ class Socks5Server:
             raise OSError(f"unexpected SOCKS version in request: {version}")
 
         if atyp == ATYP_IPV4:
-            dst_addr = socket.inet_ntoa(recv_exact(client, 4))
+            dst_host = socket.inet_ntoa(recv_exact(client, 4))
         elif atyp == ATYP_IPV6:
-            dst_addr = socket.inet_ntop(
+            dst_host = socket.inet_ntop(
                 socket.AF_INET6, recv_exact(client, 16))
         elif atyp == ATYP_DOMAIN:
             length = recv_exact(client, 1)[0]
-            dst_addr = recv_exact(client, length).decode(
+            dst_host = recv_exact(client, length).decode(
                 "ascii", errors="replace")
         else:
             self._send_error(client, REP_ATYP_NOT_SUPPORTED)
-            raise OSError(f"unsupported address type: {atyp}")
+            raise OSError(f"unsupported SOCKS5 address type: {atyp}")
 
         dst_port = struct.unpack("!H", recv_exact(client, 2))[0]
-        return cmd, atyp, dst_addr, dst_port
+        return cmd, atyp, dst_host, dst_port
 
     def _cmd_connect(
         self,
         client: socket.socket,
         atyp: int,
-        dst_addr: str,
+        dst_host: str,
         dst_port: int,
     ) -> None:
         """
@@ -266,7 +261,7 @@ class Socks5Server:
         # resolve domain names to an IP address
         try:
             info = socket.getaddrinfo(
-                dst_addr,
+                dst_host,
                 dst_port,
                 type=socket.SOCK_STREAM
             )
@@ -278,7 +273,7 @@ class Socks5Server:
             self._send_error(client, REP_HOST_UNREACHABLE)
             raise e
 
-        # connect to the target host
+        # connect to the target address
         target = socket.socket(family, socket.SOCK_STREAM)
         target.settimeout(self.timeout)
         try:
@@ -292,12 +287,12 @@ class Socks5Server:
             self._send_error(client, REP_HOST_UNREACHABLE)
             raise e
 
-        # inform the client which local address/port we bound to
-        bound_ip, bound_port = target.getsockname()[:2]
-        self._send_reply(client, REP_SUCCESS, bound_ip, bound_port)
+        # inform the client which local address we bound to
+        bind_host, bind_port = target.getsockname()[:2]
+        self._send_reply(client, REP_SUCCESS, bind_host, bind_port)
 
         self.log.debug(
-            f"CONNECT relaying: local client <-> {resolved_ip}:{dst_port}"
+            f"CONNECT relaying: local client <-> {dst_host}:{dst_port}"
         )
 
         try:
@@ -310,7 +305,7 @@ class Socks5Server:
         self,
         client: socket.socket,
         atyp: int,
-        dst_addr: str,
+        dst_host: str,
         dst_port: int,
     ) -> None:
         """
@@ -318,9 +313,9 @@ class Socks5Server:
 
         flow (RFC 1928 §6):
         1. server opens a TCP listener and sends a reply to the SOCKS client
-           containing the bind address and port.
+           containing the bind address.
         2. a remote host connects to that listener (typically the host the
-           client asked for in dst_addr/dst_port).
+           client asked for in dst_host/dst_port).
         3. server sends a second reply containing the remote peer's address and
            then relays data between the SOCKS client and the remote peer.
         """
@@ -332,16 +327,16 @@ class Socks5Server:
             # bind to the server's external interface on a random port
             bind_sock.bind((self.host, 0))
             bind_sock.listen(1)
-            bound_ip, bound_port = bind_sock.getsockname()
+            bind_host, bind_port = bind_sock.getsockname()
         except OSError as e:
             close_socket(bind_sock)
             self._send_error(client, REP_GENERAL_FAILURE)
             raise e
 
         # first reply: tell the client where the server is listening
-        self._send_reply(client, REP_SUCCESS, bound_ip, bound_port)
+        self._send_reply(client, REP_SUCCESS, bind_host, bind_port)
 
-        self.log.debug(f"BIND listening on {bound_ip}:{bound_port}")
+        self.log.debug(f"BIND listening on {bind_host}:{bind_port}")
 
         # wait for the expected remote peer to connect
         try:
@@ -362,11 +357,11 @@ class Socks5Server:
         )
 
         # second reply: tell the client who connected
-        remote_ip, remote_port = remote_addr[0], remote_addr[1]
+        remote_host, remote_port = remote_addr[0], remote_addr[1]
         self._send_reply(
             client,
             REP_SUCCESS,
-            remote_ip,
+            remote_host,
             remote_port
         )
 
@@ -381,7 +376,7 @@ class Socks5Server:
         self,
         client: socket.socket,
         atyp: int,
-        dst_addr: str,
+        dst_host: str,
         dst_port: int,
     ) -> None:
         """
@@ -395,7 +390,7 @@ class Socks5Server:
             |  2  |  1   |  1   | Variable |    2     | Variable |
             +-----+------+------+----------+----------+----------+
 
-        fragmentation (FRAG ≠ 0) is not supported and such datagrams are
+        fragmentation (FRAG != 0) is not supported and such datagrams are
         silently dropped per RFC recommendation.
         """
 
@@ -404,47 +399,50 @@ class Socks5Server:
         udp_sock.settimeout(self.udp_timeout)
         try:
             udp_sock.bind((self.host, 0))
-            udp_ip, udp_port = udp_sock.getsockname()
+            udp_host, udp_port = udp_sock.getsockname()
         except OSError as e:
             close_socket(udp_sock)
             self._send_error(client, REP_GENERAL_FAILURE)
             raise e
 
-        # tell the client which UDP address/port to send its datagrams to
-        self._send_reply(client, REP_SUCCESS, udp_ip, udp_port)
+        # tell the client which UDP address to send its datagrams to
+        self._send_reply(client, REP_SUCCESS, udp_host, udp_port)
 
-        self.log.debug(f"UDP ASSOCIATE relay on {udp_ip}:{udp_port}")
+        self.log.debug(f"UDP ASSOCIATE relay on {udp_host}:{udp_port}")
 
         # identify the client's UDP source from the TCP control connection
-        client_tcp_ip = client.getpeername()[0]
+        client_tcp_host = client.getpeername()[0]
 
-        # track (client_udp_addr -> target_addr) mappings so we can reverse
-        # replies from targets back to the correct SOCKS client UDP endpoint.
-        # key: target (ip, port) -> value: client UDP (ip, port)
+        # track the client's UDP address so we can reverse replies from targets
+        # back to the correct SOCKS client UDP endpoint.
         client_udp_addr: tuple[str, int] | None = None
 
         def udp_relay_loop() -> None:
-            nonlocal client_udp_addr
+            nonlocal self, udp_sock, client_udp_addr
             while True:
                 try:
                     data, sender_addr = udp_sock.recvfrom(65535)
                 except OSError:
-                    break  # timeout or socket closed
+                    # timeout or socket closed
+                    self.log.debug("relay closed")
+                    break
 
                 if not data:
                     continue
 
-                sender_ip = sender_addr[0]
+                sender_host = sender_addr[0]
 
                 # forward datagram from SOCKS client to target.
                 # a datagram from the SOCKS client must have a SOCKS5 UDP
                 # header. we identify the client by matching its IP with the TCP
                 # control IP.
-                if sender_ip == client_tcp_ip:
-                    client_udp_addr = sender_addr  # remember for return path
-
+                if sender_host == client_tcp_host:
                     if len(data) < 4:
-                        continue  # too short to be a valid SOCKS5 UDP header
+                        # too short to be a valid SOCKS5 UDP header
+                        continue
+
+                    # remember client's UDP address for the return path
+                    client_udp_addr = sender_addr
 
                     rsv, frag, sub_atyp = struct.unpack("!HBB", data[:4])
 
@@ -455,60 +453,56 @@ class Socks5Server:
                     offset = 4
                     try:
                         if sub_atyp == ATYP_IPV4:
-                            tgt_ip = socket.inet_ntoa(data[offset:offset + 4])
+                            target_host = socket.inet_ntoa(
+                                data[offset:offset + 4])
                             offset += 4
                         elif sub_atyp == ATYP_IPV6:
-                            tgt_ip = socket.inet_ntop(
+                            target_host = socket.inet_ntop(
                                 socket.AF_INET6, data[offset:offset + 16]
                             )
                             offset += 16
                         elif sub_atyp == ATYP_DOMAIN:
                             dlen = data[offset]
                             offset += 1
-                            tgt_ip = data[offset:offset + dlen].decode(
+                            target_host = data[offset:offset + dlen].decode(
                                 "ascii",
                                 errors="replace"
                             )
                             offset += dlen
 
                             # resolve the domain to an IP
-                            tgt_ip = socket.gethostbyname(tgt_ip)
+                            target_host = socket.gethostbyname(target_host)
                         else:
-                            continue  # unknown address type, drop
+                            # unknown SOCKS5 address type, drop
+                            continue
 
-                        tgt_port = struct.unpack(
-                            "!H", data[offset:offset + 2])[0]
+                        target_port = struct.unpack(
+                            "!H",
+                            data[offset:offset + 2]
+                        )[0]
                         offset += 2
                         payload = data[offset:]
                     except (struct.error, OSError, IndexError):
                         continue
 
                     try:
-                        udp_sock.sendto(payload, (tgt_ip, tgt_port))
+                        udp_sock.sendto(payload, (target_host, target_port))
                     except OSError:
                         pass
 
                 # receive reply datagram from target, wrap, and forward to the
                 # client.
                 elif client_udp_addr is not None:
-                    tgt_ip, tgt_port = sender_addr[0], sender_addr[1]
+                    target_host, target_port = sender_addr[0], sender_addr[1]
 
                     # build the SOCKS5 UDP reply header
-                    if ":" in tgt_ip:
-                        addr_bytes = (
-                            bytes([ATYP_IPV6])
-                            + socket.inet_pton(socket.AF_INET6, tgt_ip)
-                        )
-                    else:
-                        addr_bytes = (
-                            bytes([ATYP_IPV4])
-                            + socket.inet_aton(tgt_ip)
-                        )
-
+                    addr_bytes, atyp = self._encode_socks5_addr(
+                        target_host,
+                        target_port
+                    )
                     udp_header = (
                         struct.pack("!HB", 0, 0)  # RSV=0, FRAG=0
                         + addr_bytes
-                        + struct.pack("!H", tgt_port)
                     )
 
                     try:
@@ -529,7 +523,7 @@ class Socks5Server:
             while True:
                 readable, _, _ = select.select([client], [], [], self.timeout)
                 if readable:
-                    # any data (or EOF) on the control socket ends the session
+                    # EOF on the control socket ends the session
                     if not client.recv(1):
                         break
                 # if the relay thread died (e.g. timeout), stop waiting
@@ -569,11 +563,41 @@ class Socks5Server:
                 except OSError:
                     return
 
+    def _encode_socks5_addr(self, host: str, port: int) -> tuple[bytes, int]:
+        atyp = ATYP_DOMAIN
+        try:
+            temp = ipaddress.ip_address(host)
+            if isinstance(temp, ipaddress.IPv4Address):
+                atyp = ATYP_IPV4
+            elif isinstance(temp, ipaddress.IPv6Address):
+                atyp = ATYP_IPV6
+        except ValueError:
+            # not a valid IP address so it must be a domain
+            pass
+
+        if atyp == ATYP_IPV4:
+            host_bytes = socket.inet_aton(host)
+        elif atyp == ATYP_IPV6:
+            host_bytes = socket.inet_pton(socket.AF_INET6, host)
+        elif atyp == ATYP_DOMAIN:
+            encoded = host.encode()
+            if len(encoded) > 255:
+                raise ValueError(
+                    "domain name (with UTF-8 encoding) is larger than 255 bytes"
+                )
+            host_bytes = len(encoded).to_bytes(1) + encoded
+        else:
+            host_bytes = b"\x00\x00\x00\x00"  # fallback: 0.0.0.0
+
+        port_bytes = struct.pack("!H", port)
+
+        return (host_bytes + port_bytes, atyp)
+
     def _send_reply(
         self,
         client: socket.socket,
         rep: int,
-        bind_addr: str,
+        bind_host: str,
         bind_port: int
     ) -> bytes:
         """
@@ -584,33 +608,9 @@ class Socks5Server:
             +-----+-----+-------+------+----------+----------+
         """
 
-        # figure out the address type
-        atyp = ATYP_DOMAIN
-        try:
-            temp = ipaddress.ip_address(bind_addr)
-            if isinstance(temp, ipaddress.IPv4Address):
-                atyp = ATYP_IPV4
-            elif isinstance(temp, ipaddress.IPv6Address):
-                atyp = ATYP_IPV6
-        except ValueError:
-            # not a valid IP address
-            pass
-
+        addr_bytes, atyp = self._encode_socks5_addr(bind_host, bind_port)
         header = struct.pack("!BBBB", SOCKS_VERSION, rep, RSV, atyp)
-
-        if atyp == ATYP_IPV4:
-            addr_bytes = socket.inet_aton(bind_addr)
-        elif atyp == ATYP_IPV6:
-            addr_bytes = socket.inet_pton(socket.AF_INET6, bind_addr)
-        elif atyp == ATYP_DOMAIN:
-            encoded = bind_addr.encode()
-            addr_bytes = bytes([len(encoded)]) + encoded
-        else:
-            addr_bytes = b"\x00\x00\x00\x00"  # fallback: 0.0.0.0
-
-        port_bytes = struct.pack("!H", bind_port)
-
-        client.sendall(header + addr_bytes + port_bytes)
+        client.sendall(header + addr_bytes)
 
     def _send_error(self, client: socket.socket, rep: int) -> None:
         """send a SOCKS5 error reply with a zeroed BND address."""

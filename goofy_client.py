@@ -46,11 +46,11 @@ RSV = 0
 class GoofyClientSocket:
     client: socket.socket  # local client
     status: GoofySocketStatus = GoofySocketStatus.WaitingToOpen
-    bind_addr: str = ""
+    bind_host: str = ""
     bind_port: int = 0
 
     # only for bind/listen
-    inbound_addr: str = ""
+    inbound_host: str = ""
     inbound_port: int = 0
 
     in_buf: bytearray = field(default_factory=bytearray)
@@ -58,6 +58,15 @@ class GoofyClientSocket:
     last_io_time: float = 0.
 
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass
+class GoofyClientUdpRelay:
+    sock: socket.socket
+
+    # track the client's UDP address so we can reverse replies from targets back
+    # to the correct SOCKS client UDP endpoint.
+    client_addr: tuple[str, int] | None = None
 
 
 class GoofyClient:
@@ -98,13 +107,17 @@ class GoofyClient:
 
     _server_sock: socket.socket | None = None
     _running: bool = False
+
     _sockets: dict[int, GoofyClientSocket] = {}
     _sockets_lock = threading.Lock()
+
+    _udp_relays: dict[int, GoofyClientUdpRelay] = {}
+    _udp_relays_lock = threading.Lock()
 
     """
     thread flow
 
-    [thread where the object was constructed]
+    [thread where the object was constructed ("main")]
     1. starts the control thread.
     2. starts accepting local SOCKS5 clients and spawning new client threads.
 
@@ -129,7 +142,7 @@ class GoofyClient:
     [receive thread]
     1. receives events and socket IO packets from the goofy server as fast as
        possible.
-    2. updates socket info (status, bind address & port, etc.).
+    2. updates socket info (status, bind address, etc.).
     3. relays data from socket IO packets to local SOCKS5 clients (if their
        `relaying` flag is enabled) or stores it in a buffer for later (if the
        `relaying` flag is not enabled yet).
@@ -196,8 +209,8 @@ class GoofyClient:
             while self._running:
                 try:
                     client_sock, client_addr = self._server_sock.accept()
-                except OSError:
-                    self.log.error("accept failed")
+                except Exception as e:
+                    self.log.fatal(f"accept failed: {format_exception(e)}")
                     break
 
                 if not (self._running and self._accepting_clients):
@@ -266,10 +279,10 @@ class GoofyClient:
 
             # call the appropriate command handler
 
-            cmd, atyp, dst_addr, dst_port = self._read_request(client)
+            cmd, atyp, dst_host, dst_port = self._read_request(client)
 
             if cmd == CMD_CONNECT:
-                cmd_name = f"CONNECT {dst_addr}:{dst_port}"
+                cmd_name = f"CONNECT {dst_host}:{dst_port}"
             elif cmd == CMD_BIND:
                 cmd_name = "BIND"
             elif cmd == CMD_UDP_ASSOCIATE:
@@ -282,18 +295,18 @@ class GoofyClient:
 
             if cmd == CMD_CONNECT:
                 self.log.info(cmd_name)
-                self._cmd_connect(client, atyp, dst_addr, dst_port)
+                self._cmd_connect(client, atyp, dst_host, dst_port)
             elif cmd == CMD_BIND:
                 self.log.info(cmd_name)
-                self._cmd_bind(client, atyp, dst_addr, dst_port)
+                self._cmd_bind(client, atyp, dst_host, dst_port)
             elif cmd == CMD_UDP_ASSOCIATE:
                 self.log.info(cmd_name)
-                self._cmd_udp_associate(client, atyp, dst_addr, dst_port)
+                self._cmd_udp_associate(client, atyp, dst_host, dst_port)
             else:
                 self.log.warning(cmd_name)
                 self._send_error(client, REP_CMD_NOT_SUPPORTED)
         except BaseException as e:
-            self.log.warning(format_exception(e))
+            self.log.error(format_exception(e))
         finally:
             close_socket(client)
 
@@ -337,7 +350,7 @@ class GoofyClient:
         self, client: socket.socket
     ) -> tuple[int, int, str, int]:
         """
-        parse a SOCKS5 request and return (cmd, atyp, dst_addr, dst_port).
+        parse a SOCKS5 request and return (cmd, atyp, dst_host, dst_port).
 
         request structure:
             +-----+-----+-------+------+----------+----------+
@@ -352,26 +365,26 @@ class GoofyClient:
             raise Exception(f"unexpected SOCKS version in request: {version}")
 
         if atyp == ATYP_IPV4:
-            dst_addr = socket.inet_ntoa(recv_exact(client, 4))
+            dst_host = socket.inet_ntoa(recv_exact(client, 4))
         elif atyp == ATYP_IPV6:
-            dst_addr = socket.inet_ntop(
+            dst_host = socket.inet_ntop(
                 socket.AF_INET6, recv_exact(client, 16))
         elif atyp == ATYP_DOMAIN:
             length = recv_exact(client, 1)[0]
-            dst_addr = recv_exact(client, length).decode(
+            dst_host = recv_exact(client, length).decode(
                 "ascii", errors="replace")
         else:
             self._send_error(client, REP_ATYP_NOT_SUPPORTED)
-            raise Exception(f"unsupported address type: {atyp}")
+            raise Exception(f"unsupported SOCKS5 address type: {atyp}")
 
         dst_port = struct.unpack("!H", recv_exact(client, 2))[0]
-        return cmd, atyp, dst_addr, dst_port
+        return cmd, atyp, dst_host, dst_port
 
     def _cmd_connect(
         self,
         client: socket.socket,
         atyp: int,
-        dst_addr: str,
+        dst_host: str,
         dst_port: int,
     ) -> None:
         """
@@ -382,16 +395,17 @@ class GoofyClient:
 
         socket_id = self._generate_socket_id()
         sock = GoofyClientSocket(client.dup())
-        self.log.debug(f"registered socket ID {socket_id}")
 
         force_acquire(self._sockets_lock)
         self._sockets[socket_id] = sock
         self._sockets_lock.release()
 
+        self.log.debug(f"registered socket ID {socket_id}")
+
         # tell goofy server to open the socket
         self._enqueue_outgoing_packet(GoofyCommandOpenSocket(
             socket_id,
-            dst_addr,
+            dst_host,
             dst_port
         ))
 
@@ -458,11 +472,11 @@ class GoofyClient:
 
                 raise ValueError("unsupported socket status")
 
-        # inform the client which local address/port we (goofy server) bound to
+        # inform the client which local address the goofy server bound to
         self._send_reply(
             client,
             REP_SUCCESS,
-            sock.bind_addr,
+            sock.bind_host,
             sock.bind_port
         )
 
@@ -471,14 +485,14 @@ class GoofyClient:
         sock.last_io_time = time.time()
         sock.lock.release()
         self.log.debug(
-            f"relay planned: local client <-> {dst_addr}:{dst_port}"
+            f"relay planned: local client <-> {dst_host}:{dst_port}"
         )
 
     def _cmd_bind(
         self,
         client: socket.socket,
         atyp: int,
-        dst_addr: str,
+        dst_host: str,
         dst_port: int,
     ) -> None:
         """
@@ -486,9 +500,9 @@ class GoofyClient:
 
         flow (RFC 1928 §6):
         1. server opens a TCP listener and sends a reply to the SOCKS client
-           containing the bind address and port.
+           containing the bind address.
         2. a remote host connects to that listener (typically the host the
-           client asked for in dst_addr/dst_port).
+           client asked for in dst_host/dst_port).
         3. server sends a second reply containing the remote peer's address and
            then relays data between the SOCKS client and the remote peer.
         """
@@ -497,11 +511,12 @@ class GoofyClient:
 
         socket_id = self._generate_socket_id()
         sock = GoofyClientSocket(client.dup())
-        self.log.debug(f"registered socket ID {socket_id}")
 
         force_acquire(self._sockets_lock)
         self._sockets[socket_id] = sock
         self._sockets_lock.release()
+
+        self.log.debug(f"registered socket ID {socket_id}")
 
         # tell goofy server to bind a listening socket
         self._enqueue_outgoing_packet(GoofyCommandBind(socket_id))
@@ -573,12 +588,12 @@ class GoofyClient:
         self._send_reply(
             client,
             REP_SUCCESS,
-            sock.bind_addr,
+            sock.bind_host,
             sock.bind_port
         )
         self.log.debug(
             f"goofy server listening on "
-            f"{sock.bind_addr}:{sock.bind_port}"
+            f"{sock.bind_host}:{sock.bind_port}"
         )
 
         # wait for the expected remote peer to connect. we will know it happened
@@ -617,7 +632,7 @@ class GoofyClient:
 
                 raise ValueError("unexpected socket status")
 
-            if not sock.inbound_addr:
+            if not sock.inbound_host:
                 # stop if we've been waiting for longer than bind_timeout
                 if time.time() - time_start > self.bind_timeout:
                     sock.status = GoofySocketStatus.Closed
@@ -640,14 +655,14 @@ class GoofyClient:
 
         self.log.debug(
             f"inbound connection from "
-            f"{sock.inbound_addr}:{sock.inbound_port}"
+            f"{sock.inbound_host}:{sock.inbound_port}"
         )
 
         # second reply: tell the client who connected
         self._send_reply(
             client,
             REP_SUCCESS,
-            sock.inbound_addr,
+            sock.inbound_host,
             sock.inbound_port
         )
 
@@ -657,14 +672,98 @@ class GoofyClient:
         sock.lock.release()
         self.log.debug(
             f"relay planned: local client <-> "
-            f"{sock.inbound_addr}:{sock.inbound_port}"
+            f"{sock.inbound_host}:{sock.inbound_port}"
         )
+
+    def _udp_relay_loop(
+        self,
+        udp_relay_id: int,
+        relay: GoofyClientUdpRelay,
+        client_tcp_host: str
+    ) -> None:
+        try:
+            while True:
+                try:
+                    data, sender_addr = relay.sock.recvfrom(65535)
+                except OSError as e:
+                    # timeout or socket closed
+                    self.log.debug(format_exception(e))
+                    break
+
+                # NOTE: a datagram from the SOCKS5 client must have a SOCKS5 UDP header.
+                # we identify the client by matching its IP with the TCP control
+                # socket's IP.
+
+                # skip if the IP doesn't match the client's
+                if sender_addr[0] != client_tcp_host:
+                    continue
+
+                if not data:
+                    continue
+
+                if len(data) < 8:
+                    # too short to be a valid SOCKS5 UDP header
+                    continue
+
+                # remember client's UDP address for the return path
+                relay.client_addr = sender_addr
+
+                rsv, frag, sub_atyp = struct.unpack("!HBB", data[:4])
+
+                if frag != 0:
+                    # fragmentation not supported, drop silently
+                    continue
+
+                offset = 4
+                try:
+                    if sub_atyp == ATYP_IPV4:
+                        target_host = socket.inet_ntoa(
+                            data[offset:offset + 4]
+                        )
+                        offset += 4
+                    elif sub_atyp == ATYP_IPV6:
+                        target_host = socket.inet_ntop(
+                            socket.AF_INET6, data[offset:offset + 16]
+                        )
+                        offset += 16
+                    elif sub_atyp == ATYP_DOMAIN:
+                        dlen = data[offset]
+                        offset += 1
+                        target_host = data[offset:offset + dlen].decode(
+                            "ascii",
+                            errors="replace"
+                        )
+                        offset += dlen
+
+                        # resolve the domain to an IP
+                        target_host = socket.gethostbyname(target_host)
+                    else:
+                        # unknown SOCKS5 address type, drop
+                        continue
+
+                    target_port = struct.unpack(
+                        "!H",
+                        data[offset:offset + 2]
+                    )[0]
+                    offset += 2
+                    payload = data[offset:]
+                except (struct.error, OSError, IndexError):
+                    continue
+
+                self._enqueue_outgoing_packet(GoofyUdpPacket(
+                    udp_relay_id,
+                    target_host,
+                    target_port,
+                    payload
+                ))
+        except BaseException as e:
+            self.log.error(format_exception(e))
 
     def _cmd_udp_associate(
         self,
         client: socket.socket,
         atyp: int,
-        dst_addr: str,
+        dst_host: str,
         dst_port: int,
     ) -> None:
         """
@@ -678,136 +777,51 @@ class GoofyClient:
             |  2  |  1   |  1   | Variable |    2     | Variable |
             +-----+------+------+----------+----------+----------+
 
-        fragmentation (FRAG ≠ 0) is not supported and such datagrams are
+        fragmentation (FRAG != 0) is not supported and such datagrams are
         silently dropped per RFC recommendation.
         """
 
-        # not implemented yet
-        self.log.warning("UDP_ASSOCIATE not yet implemented")
-        self._send_error_and_close(client, REP_CMD_NOT_SUPPORTED)
-
-        """
         # open the UDP relay socket on a random port
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_sock.settimeout(self.udp_timeout)
         try:
             udp_sock.bind((self.host, 0))
-            udp_ip, udp_port = udp_sock.getsockname()
+            udp_host, udp_port = udp_sock.getsockname()
         except OSError as e:
             close_socket(udp_sock)
             self._send_error_and_close(client, REP_GENERAL_FAILURE)
             raise e
 
-        # tell the client which UDP address/port to send its datagrams to
-        self._send_reply(client, REP_SUCCESS, udp_ip, udp_port)
-
-        self.log.debug(f"UDP ASSOCIATE relay on {udp_ip}:{udp_port}")
+        # tell the client which UDP address to send its datagrams to
+        self._send_reply(client, REP_SUCCESS, udp_host, udp_port)
 
         # identify the client's UDP source from the TCP control connection
-        client_tcp_ip = client.getpeername()[0]
+        client_tcp_host = client.getpeername()[0]
 
-        # track (client_udp_addr -> target_addr) mappings so we can reverse
-        # replies from targets back to the correct SOCKS client UDP endpoint.
-        # key: target (ip, port) -> value: client UDP (ip, port)
-        client_udp_addr: tuple[str, int] | None = None
+        # generate a random UDP relay ID and keep track of it
 
-        def udp_relay_loop() -> None:
-            nonlocal client_udp_addr
-            while True:
-                try:
-                    data, sender_addr = udp_sock.recvfrom(65535)
-                except OSError:
-                    break  # timeout or socket closed
+        udp_relay_id = self._generate_udp_relay_id()
+        relay = GoofyClientUdpRelay(udp_sock.dup())
 
-                if not data:
-                    continue
+        force_acquire(self._udp_relays_lock)
+        self._udp_relays[udp_relay_id] = relay
+        self._udp_relays_lock.release()
 
-                sender_ip = sender_addr[0]
+        # tell the goofy server to open a relay as well
+        self._enqueue_outgoing_packet(
+            GoofyCommandOpenUdpRelay(udp_relay_id)
+        )
 
-                # forward datagram from SOCKS client to target.
-                # a datagram from the SOCKS client must have a SOCKS5 UDP
-                # header. we identify the client by matching its IP with the TCP
-                # control IP.
-                if sender_ip == client_tcp_ip:
-                    client_udp_addr = sender_addr  # remember for return path
+        self.log.debug(
+            f"registered UDP relay ID {udp_relay_id} ({udp_host}:{udp_port})"
+        )
 
-                    if len(data) < 4:
-                        continue  # too short to be a valid SOCKS5 UDP header
-
-                    rsv, frag, sub_atyp = struct.unpack("!HBB", data[:4])
-
-                    if frag != 0:
-                        # fragmentation not supported, drop silently
-                        continue
-
-                    offset = 4
-                    try:
-                        if sub_atyp == ATYP_IPV4:
-                            tgt_ip = socket.inet_ntoa(data[offset:offset + 4])
-                            offset += 4
-                        elif sub_atyp == ATYP_IPV6:
-                            tgt_ip = socket.inet_ntop(
-                                socket.AF_INET6, data[offset:offset + 16]
-                            )
-                            offset += 16
-                        elif sub_atyp == ATYP_DOMAIN:
-                            dlen = data[offset]
-                            offset += 1
-                            tgt_ip = data[offset:offset + dlen].decode(
-                                "ascii",
-                                errors="replace"
-                            )
-                            offset += dlen
-
-                            # resolve the domain to an IP
-                            tgt_ip = socket.gethostbyname(tgt_ip)
-                        else:
-                            continue  # unknown address type, drop
-
-                        tgt_port = struct.unpack(
-                            "!H", data[offset:offset + 2])[0]
-                        offset += 2
-                        payload = data[offset:]
-                    except (struct.error, OSError, IndexError):
-                        continue
-
-                    try:
-                        udp_sock.sendto(payload, (tgt_ip, tgt_port))
-                    except OSError:
-                        pass
-
-                # receive reply datagram from target, wrap, and forward to the
-                # client.
-                elif client_udp_addr is not None:
-                    tgt_ip, tgt_port = sender_addr[0], sender_addr[1]
-
-                    # build the SOCKS5 UDP reply header
-                    if ":" in tgt_ip:
-                        addr_bytes = (
-                            bytes([ATYP_IPV6])
-                            + socket.inet_pton(socket.AF_INET6, tgt_ip)
-                        )
-                    else:
-                        addr_bytes = (
-                            bytes([ATYP_IPV4])
-                            + socket.inet_aton(tgt_ip)
-                        )
-
-                    udp_header = (
-                        struct.pack("!HB", 0, 0)  # RSV=0, FRAG=0
-                        + addr_bytes
-                        + struct.pack("!H", tgt_port)
-                    )
-
-                    try:
-                        udp_sock.sendto(udp_header + data, client_udp_addr)
-                    except OSError:
-                        pass
-
-        # start a UDP relay thread
+        # start the relay thread to forward datagrams from the SOCKS5 client to
+        # their targets.
         relay_thread = threading.Thread(
-            target=udp_relay_loop,
+            target=self._udp_relay_loop,
             name=f"{threading.current_thread().name} (UDP relay)",
+            args=(udp_relay_id, relay, client_tcp_host),
             daemon=True
         )
         relay_thread.start()
@@ -817,16 +831,20 @@ class GoofyClient:
             while True:
                 readable, _, _ = select.select([client], [], [], self.timeout)
                 if readable:
-                    # any data (or EOF) on the control socket ends the session
+                    # EOF on the control socket ends the session
                     if not client.recv(1):
                         break
                 # if the relay thread died (e.g. timeout), stop waiting
                 if not relay_thread.is_alive():
                     break
         finally:
-            close_socket(udp_sock)
-            self.log.debug("UDP ASSOCIATE session ended")
-        """
+            close_socket(relay.sock)
+
+            force_acquire(self._udp_relays_lock)
+            self._udp_relays.pop(udp_relay_id, None)
+            self._udp_relays_lock.release()
+
+            self.log.debug("session ended")
 
     def _control_thread_run(self):
         sockets_locked = False
@@ -859,7 +877,7 @@ class GoofyClient:
 
             # handshake: verify server version
             if server_version < GOOFY_MIN_SERVER_VERSION:
-                self.log.error(
+                self.log.fatal(
                     f"server version ({server_version}) is older than the "
                     f"minimum supported ({GOOFY_MIN_SERVER_VERSION})."
                 )
@@ -873,7 +891,7 @@ class GoofyClient:
 
             # handshake: verify answer length
             if answer_len != len(correct_answer):
-                self.log.error(
+                self.log.fatal(
                     f"handshake answer has the wrong length (expected "
                     f"{len(correct_answer)} bytes but got {answer_len} bytes)."
                 )
@@ -888,7 +906,7 @@ class GoofyClient:
 
             # handshake: verify the answer
             if answer != correct_answer:
-                self.log.error(
+                self.log.fatal(
                     f"handshake answer was incorrect (expected "
                     f"{format_bytes(correct_answer)} but got "
                     f"{format_bytes(answer)})."
@@ -1068,6 +1086,37 @@ class GoofyClient:
                             )
                     finally:
                         sock.lock.release()
+                elif isinstance(packet, GoofyUdpPacket):
+                    force_acquire(self._udp_relays_lock)
+                    if packet.udp_relay_id_u16 not in self._udp_relays.keys():
+                        self._udp_relays_lock.release()
+                        continue
+
+                    relay = self._udp_relays[packet.udp_relay_id_u16]
+                    if relay.client_addr is None:
+                        self._udp_relays_lock.release()
+                        continue
+
+                    try:
+                        # wrap with SOCKS5 UDP reply header
+                        addr_bytes, atyp = self._encode_socks5_addr(
+                            packet.host,
+                            packet.port
+                        )
+                        udp_header = (
+                            struct.pack("!HB", 0, 0)  # RSV=0, FRAG=0
+                            + addr_bytes
+                        )
+
+                        # forward to the client
+                        relay.sock.sendto(
+                            udp_header + packet.payload,
+                            relay.client_addr
+                        )
+                    except Exception:
+                        pass
+
+                    self._udp_relays_lock.release()
                 elif isinstance(packet, GoofyEventSocketStatus):
                     if packet.socket_id_u32 not in self._sockets.keys():
                         continue
@@ -1083,7 +1132,7 @@ class GoofyClient:
 
                     force_acquire(sock.lock)
                     sock.status = packet.new_status
-                    sock.bind_addr = packet.bind_addr
+                    sock.bind_host = packet.bind_host
                     sock.bind_port = packet.bind_port
                     sock.lock.release()
                 elif isinstance(packet, GoofyEventSocketInboundInfo):
@@ -1093,9 +1142,19 @@ class GoofyClient:
 
                     force_acquire(sock.lock)
                     sock.status = packet.new_status
-                    sock.inbound_addr = packet.inbound_addr
+                    sock.inbound_host = packet.inbound_host
                     sock.inbound_port = packet.inbound_port
                     sock.lock.release()
+                elif isinstance(packet, GoofyEventUdpRelayClosed):
+                    force_acquire(self._udp_relays_lock)
+                    if packet.udp_relay_id_u16 not in self._udp_relays.keys():
+                        self._udp_relays_lock.release()
+                        continue
+
+                    relay = self._udp_relays[packet.udp_relay_id_u16]
+                    close_socket(relay.sock)
+
+                    self._udp_relays_lock.release()
                 else:
                     self.log.warning(
                         f"received unexpected packet type {type(packet)}"
@@ -1119,11 +1178,41 @@ class GoofyClient:
         self._outgoing_packet_queue.extend(packets)
         self._outgoing_packet_queue_lock.release()
 
+    def _encode_socks5_addr(self, host: str, port: int) -> tuple[bytes, int]:
+        atyp = ATYP_DOMAIN
+        try:
+            temp = ipaddress.ip_address(host)
+            if isinstance(temp, ipaddress.IPv4Address):
+                atyp = ATYP_IPV4
+            elif isinstance(temp, ipaddress.IPv6Address):
+                atyp = ATYP_IPV6
+        except ValueError:
+            # not a valid IP address so it must be a domain
+            pass
+
+        if atyp == ATYP_IPV4:
+            host_bytes = socket.inet_aton(host)
+        elif atyp == ATYP_IPV6:
+            host_bytes = socket.inet_pton(socket.AF_INET6, host)
+        elif atyp == ATYP_DOMAIN:
+            encoded = host.encode()
+            if len(encoded) > 255:
+                raise ValueError(
+                    "domain name (with UTF-8 encoding) is larger than 255 bytes"
+                )
+            host_bytes = len(encoded).to_bytes(1) + encoded
+        else:
+            host_bytes = b"\x00\x00\x00\x00"  # fallback: 0.0.0.0
+
+        port_bytes = struct.pack("!H", port)
+
+        return (host_bytes + port_bytes, atyp)
+
     def _send_reply(
         self,
         client: socket.socket,
         rep: int,
-        bind_addr: str,
+        bind_host: str,
         bind_port: int
     ) -> bytes:
         """
@@ -1134,33 +1223,9 @@ class GoofyClient:
             +-----+-----+-------+------+----------+----------+
         """
 
-        # figure out the address type
-        atyp = ATYP_DOMAIN
-        try:
-            temp = ipaddress.ip_address(bind_addr)
-            if isinstance(temp, ipaddress.IPv4Address):
-                atyp = ATYP_IPV4
-            elif isinstance(temp, ipaddress.IPv6Address):
-                atyp = ATYP_IPV6
-        except ValueError:
-            # not a valid IP address
-            pass
-
+        addr_bytes, atyp = self._encode_socks5_addr(bind_host, bind_port)
         header = struct.pack("!BBBB", SOCKS_VERSION, rep, RSV, atyp)
-
-        if atyp == ATYP_IPV4:
-            addr_bytes = socket.inet_aton(bind_addr)
-        elif atyp == ATYP_IPV6:
-            addr_bytes = socket.inet_pton(socket.AF_INET6, bind_addr)
-        elif atyp == ATYP_DOMAIN:
-            encoded = bind_addr.encode()
-            addr_bytes = bytes([len(encoded)]) + encoded
-        else:
-            addr_bytes = b"\x00\x00\x00\x00"  # fallback: 0.0.0.0
-
-        port_bytes = struct.pack("!H", bind_port)
-
-        client.sendall(header + addr_bytes + port_bytes)
+        client.sendall(header + addr_bytes)
 
     def _send_error(self, client: socket.socket, rep: int) -> None:
         """send a SOCKS5 error reply with a zeroed BND address."""
@@ -1191,4 +1256,14 @@ class GoofyClient:
                 continue
 
             self._sockets_lock.release()
+            return id
+
+    def _generate_udp_relay_id(self) -> int:
+        force_acquire(self._udp_relays_lock)
+        while True:
+            id = random.randint(0, 2**16 - 1)
+            if id in self._udp_relays.keys():
+                continue
+
+            self._udp_relays_lock.release()
             return id

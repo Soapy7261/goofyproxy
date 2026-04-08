@@ -7,6 +7,7 @@ import threading
 from dataclasses import dataclass
 from enum import IntEnum
 import struct
+import io
 
 from goofyio import *
 
@@ -26,8 +27,10 @@ LOG_CONFIG = {
     # use terminal colors
     "colorize": True,
     # logging: always include the thread ID, even when it has a name.
-    "always_include_thread_id": False
+    "always_include_thread_id": False,
+    "file": None
 }
+
 
 # ANSI color codes
 COL_RESET = "\033[0m"
@@ -64,6 +67,9 @@ class Formatter(logging.Formatter):
             record.levelname = "FATAL"
 
         message = super().format(record)
+
+        if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
+            LOG_CONFIG["file"].write(message + "\n")
 
         # terminal colors
         if LOG_CONFIG["colorize"]:
@@ -325,11 +331,11 @@ class GoofyCommandSetLimits(GoofyPacket):
 class GoofyCommandOpenSocket(GoofyPacket):
     """
     goofy packet sent by the goofy client commanding the server to open a TCP
-    socket with given ID and connect to given address and port.
+    socket with given ID and connect to given address.
     """
 
     socket_id_u32: int
-    dst_addr: str
+    dst_host: str
     dst_port: int
 
     @classmethod
@@ -339,7 +345,7 @@ class GoofyCommandOpenSocket(GoofyPacket):
     def _to_bytes(self) -> bytes:
         return self._packet_type().to_bytes(1) \
             + self.socket_id_u32.to_bytes(4) \
-            + encode_str_len(self.dst_addr) \
+            + encode_str_len(self.dst_host) \
             + self.dst_port.to_bytes(2)
 
 
@@ -348,7 +354,7 @@ class GoofyCommandBind(GoofyPacket):
     """
     goofy packet sent by the goofy client commanding the server to bind a
     listening socket on a random port, send us information about the bind
-    address and port, and inform us when a remote peer (inbound) connects.
+    host and port, and inform us when a remote peer (inbound) connects.
     """
 
     socket_id_u32: int
@@ -377,6 +383,24 @@ class GoofyCommandCloseSocket(GoofyPacket):
     def _to_bytes(self) -> bytes:
         return self._packet_type().to_bytes(1) \
             + self.socket_id_u32.to_bytes(4)
+
+
+@dataclass
+class GoofyCommandOpenUdpRelay(GoofyPacket):
+    """
+    goofy packet sent by the goofy client commanding the server to start a UDP
+    relay thread with given relay ID.
+    """
+
+    udp_relay_id_u16: int
+
+    @classmethod
+    def _packet_type(cls) -> int:
+        return 14
+
+    def _to_bytes(self) -> bytes:
+        return self._packet_type().to_bytes(1) \
+            + self.udp_relay_id_u16.to_bytes(2)
 
 
 @dataclass
@@ -435,6 +459,30 @@ def make_goofy_socket_io_packet(socket_id: int, data: bytes) -> GoofyPacket:
 
 
 @dataclass
+class GoofyUdpPacket(GoofyPacket):
+    """
+    goofy packet representing a UDP packet.
+    """
+
+    udp_relay_id_u16: int
+    host: str
+    port: int
+    payload: bytes
+
+    @classmethod
+    def _packet_type(cls) -> int:
+        return 22
+
+    def _to_bytes(self) -> bytes:
+        return self._packet_type().to_bytes(1) \
+            + self.udp_relay_id_u16.to_bytes(2) \
+            + encode_str_len(self.host) \
+            + self.port.to_bytes(2) \
+            + len(self.payload).to_bytes(2) \
+            + self.payload
+
+
+@dataclass
 class GoofyEventSocketStatus(GoofyPacket):
     """
     goofy packet sent by the goofy server informing the client about the new
@@ -458,12 +506,12 @@ class GoofyEventSocketStatus(GoofyPacket):
 class GoofyEventSocketBindInfo(GoofyPacket):
     """
     goofy packet sent by the goofy server informing the client about the new
-    status, bind address, and bind port of socket with given ID.
+    status, bind host, and bind port of socket with given ID.
     """
 
     socket_id_u32: int
     new_status: GoofySocketStatus
-    bind_addr: str
+    bind_host: str
     bind_port: int
 
     @classmethod
@@ -474,7 +522,7 @@ class GoofyEventSocketBindInfo(GoofyPacket):
         return self._packet_type().to_bytes(1) \
             + self.socket_id_u32.to_bytes(4) \
             + self.new_status.to_bytes(1) \
-            + encode_str_len(self.bind_addr) \
+            + encode_str_len(self.bind_host) \
             + self.bind_port.to_bytes(2)
 
 
@@ -482,12 +530,12 @@ class GoofyEventSocketBindInfo(GoofyPacket):
 class GoofyEventSocketInboundInfo(GoofyPacket):
     """
     goofy packet sent by the goofy server informing the client about the new
-    status, inbound peer address, and inbound peer port of socket with given ID.
+    status and inbound peer address of socket with given ID.
     """
 
     socket_id_u32: int
     new_status: GoofySocketStatus
-    inbound_addr: str
+    inbound_host: str
     inbound_port: int
 
     @classmethod
@@ -498,8 +546,26 @@ class GoofyEventSocketInboundInfo(GoofyPacket):
         return self._packet_type().to_bytes(1) \
             + self.socket_id_u32.to_bytes(4) \
             + self.new_status.to_bytes(1) \
-            + encode_str_len(self.inbound_addr) \
+            + encode_str_len(self.inbound_host) \
             + self.inbound_port.to_bytes(2)
+
+
+@dataclass
+class GoofyEventUdpRelayClosed(GoofyPacket):
+    """
+    goofy packet sent by the goofy server letting the client know that UDP relay
+    with given ID was closed for some reason.
+    """
+
+    udp_relay_id_u16: int
+
+    @classmethod
+    def _packet_type(cls) -> int:
+        return 33
+
+    def _to_bytes(self) -> bytes:
+        return self._packet_type().to_bytes(1) \
+            + self.udp_relay_id_u16.to_bytes(2)
 
 
 def receive_goofy_packet(io: GoofyIo) -> GoofyPacket:
@@ -519,19 +585,22 @@ def receive_goofy_packet(io: GoofyIo) -> GoofyPacket:
     elif packet_type == GoofyCommandOpenSocket.packet_type():
         buf = io.receive(6)
         socket_id = int.from_bytes(buf[:4])
-        dst_addr_len = int.from_bytes(buf[4:])
+        dst_host_len = int.from_bytes(buf[4:])
 
-        buf = io.receive(dst_addr_len + 2)
-        dst_addr = buf[:dst_addr_len].decode()
+        buf = io.receive(dst_host_len + 2)
+        dst_host = buf[:dst_host_len].decode()
         dst_port = int.from_bytes(buf[-2:])
 
-        return GoofyCommandOpenSocket(socket_id, dst_addr, dst_port)
+        return GoofyCommandOpenSocket(socket_id, dst_host, dst_port)
     elif packet_type == GoofyCommandBind.packet_type():
         socket_id = int.from_bytes(io.receive(4))
         return GoofyCommandBind(socket_id)
     elif packet_type == GoofyCommandCloseSocket.packet_type():
         socket_id = int.from_bytes(io.receive(4))
         return GoofyCommandCloseSocket(socket_id)
+    elif packet_type == GoofyCommandOpenUdpRelay.packet_type():
+        udp_relay_id = int.from_bytes(io.receive(2))
+        return GoofyCommandOpenUdpRelay(udp_relay_id)
     elif packet_type == GoofySocketIoPacket.packet_type():
         buf = io.receive(6)
         socket_id = int.from_bytes(buf[:4])
@@ -544,6 +613,24 @@ def receive_goofy_packet(io: GoofyIo) -> GoofyPacket:
         data_len = buf[4]
         data = io.receive(data_len)
         return GoofySocketIoSmallPacket(socket_id, data)
+    elif packet_type == GoofyUdpPacket.packet_type():
+        buf = io.receive(4)
+        udp_relay_id = int.from_bytes(buf[:2])
+        host_len = int.from_bytes(buf[2:])
+
+        buf = io.receive(host_len + 4)
+        host = buf[:host_len].decode()
+        port = int.from_bytes(buf[-4:-2])
+        payload_len = int.from_bytes(buf[-2:])
+
+        payload = io.receive(payload_len)
+
+        return GoofyUdpPacket(
+            udp_relay_id,
+            host,
+            port,
+            payload
+        )
     elif packet_type == GoofyEventSocketStatus.packet_type():
         buf = io.receive(5)
         socket_id = int.from_bytes(buf[:4])
@@ -556,33 +643,36 @@ def receive_goofy_packet(io: GoofyIo) -> GoofyPacket:
         buf = io.receive(7)
         socket_id = int.from_bytes(buf[:4])
         new_status = int.from_bytes(buf[4:5])
-        bind_addr_len = int.from_bytes(buf[5:])
+        bind_host_len = int.from_bytes(buf[5:])
 
-        buf = io.receive(bind_addr_len + 2)
-        bind_addr = buf[:bind_addr_len].decode()
+        buf = io.receive(bind_host_len + 2)
+        bind_host = buf[:bind_host_len].decode()
         bind_port = int.from_bytes(buf[-2:])
 
         return GoofyEventSocketBindInfo(
             socket_id,
             GoofySocketStatus(new_status),
-            bind_addr,
+            bind_host,
             bind_port
         )
     elif packet_type == GoofyEventSocketInboundInfo.packet_type():
         buf = io.receive(7)
         socket_id = int.from_bytes(buf[:4])
         new_status = int.from_bytes(buf[4:5])
-        inbound_addr_len = int.from_bytes(buf[5:])
+        inbound_host_len = int.from_bytes(buf[5:])
 
-        buf = io.receive(inbound_addr_len + 2)
-        inbound_addr = buf[:inbound_addr_len].decode()
+        buf = io.receive(inbound_host_len + 2)
+        inbound_host = buf[:inbound_host_len].decode()
         inbound_port = int.from_bytes(buf[-2:])
 
         return GoofyEventSocketInboundInfo(
             socket_id,
             GoofySocketStatus(new_status),
-            inbound_addr,
+            inbound_host,
             inbound_port
         )
+    elif packet_type == GoofyEventUdpRelayClosed.packet_type():
+        udp_relay_id = int.from_bytes(io.receive(2))
+        return GoofyEventUdpRelayClosed(udp_relay_id)
 
-    raise IOError(f"unsupported goofy packet type ({packet_type})")
+    raise ValueError(f"unsupported goofy packet type ({packet_type})")
