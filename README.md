@@ -17,7 +17,7 @@ through goofy ahh data channels. You could flash colorful squares in a video
 call, play sine tones with different frequencies in a voice call, send botted
 text messages, read and write `.txt` files, flicker a light really fast, send
 DNS queries with custom TXT records, transmit pulses to an unused FM frequnecy
-with a software-defined radio, the list goes on.
+with a software-defined radio dongle, the list goes on.
 
 Now let's see what this project provides.
 
@@ -72,5 +72,6 @@ python ./main.py c --port 1080 --log-level debug
 
 # Disclaimer
 
-I do not encourage illegal activities. Please stay within legal bounds. Anything
-you do with this project is your own responsibility.
+1. I do not encourage illegal activities. Please stay within legal bounds.
+2. Anything you do with this project is solely your responsibility.
+3. Everything in the `LICENSE` file.
