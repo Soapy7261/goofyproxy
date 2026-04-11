@@ -1,37 +1,82 @@
-from pathlib import Path
 import argparse
 from enum import StrEnum
 from typing import Self
-import socket
 
 from goofy_client import GoofyClient
 from goofy_server import GoofyServer
-from goofyio import SocketIo
+from audioio import AudioIo, AudioDeviceType, paudio_terminate
 from common import *
 
 
 def run(args: argparse.Namespace):
-    if args.mode == "s":
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 50505))
-        server_sock.listen(1)
-        client_sock, client_addr = server_sock.accept()
+    if args.mode == "list_audio_devices":
+        input_devices = AudioIo.list_devices(AudioDeviceType.Input)
+        output_devices = AudioIo.list_devices(AudioDeviceType.Output)
 
+        s = "[input devices]\n"
+        for i in range(len(input_devices)):
+            device = input_devices[i]
+            s += f"{i}. "
+            s += device.name
+            if device.is_default_input:
+                s += " (default)"
+            s += "\n"
+        if not input_devices:
+            s += "empty\n"
+
+        s += "\n[output devices]\n"
+        for i in range(len(output_devices)):
+            device = output_devices[i]
+            s += f"{i}. "
+            s += device.name
+            if device.is_default_output:
+                s += " (default)"
+            s += "\n"
+        if not output_devices:
+            s += "empty\n"
+
+        print(s)
+        return
+
+    input_devices = AudioIo.list_devices(AudioDeviceType.Input)
+    output_devices = AudioIo.list_devices(AudioDeviceType.Output)
+    if not input_devices or not output_devices:
+        raise Exception(
+            f"need at least 1 input and 1 output audio device. found "
+            f"{len(input_devices)} input devices and {len(output_devices)} "
+            f"output devices."
+        )
+    if args.input_device < 0 or args.input_device >= len(input_devices):
+        raise Exception("invalid input audio device index")
+    if args.output_device < 0 or args.output_device >= len(output_devices):
+        raise Exception("invalid output audio device index")
+
+    gio = AudioIo(
+        True,
+        input_devices[args.input_device],
+        48000,
+        4096,
+        output_devices[args.output_device],
+        48000,
+        4096
+    )
+
+    print("spinnin'")
+    while True:
+        time.sleep(1.)
+
+    if args.mode == "server":
         GoofyServer(
-            SocketIo(client_sock),
+            gio,
             log_level=LOG_CONFIG["level"]
         )
-    elif args.mode == "c":
+    elif args.mode == "client":
         if not args.port:
             print("port is required in client mode")
             return
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect(("127.0.0.1", 50505))
-
         GoofyClient(
-            SocketIo(sock),
+            gio,
             host="0.0.0.0",
             port=args.port,
             log_level=LOG_CONFIG["level"]
@@ -84,8 +129,24 @@ def main():
     )
     parser.add_argument(
         "mode",
-        choices=["s", "c"],
-        help="s: run as server, c: run as client"
+        choices=["server", "client", "list_audio_devices"],
+        help="which mode to run in"
+    )
+    parser.add_argument(
+        "-i",
+        "--input-device",
+        type=int,
+        default=0,
+        help="input audio device index (use list_audio_devices), will use the "
+        "default if not provided."
+    )
+    parser.add_argument(
+        "-o",
+        "--output-device",
+        type=int,
+        default=0,
+        help="output audio device index (use list_audio_devices), will use the "
+        "default if not provided."
     )
     parser.add_argument(
         "-p",
@@ -135,6 +196,8 @@ def main():
         if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
             LOG_CONFIG["file"].flush()
             LOG_CONFIG["file"].close()
+
+        paudio_terminate()
 
 
 if __name__ == "__main__":

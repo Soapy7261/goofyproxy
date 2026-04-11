@@ -1,8 +1,9 @@
 """
-abstraction for data transfer through goofy ahh channels
+abstraction for data transfer through goofy ahh channels.
 """
 
 import socket
+
 import base64
 import gzip
 from pathlib import Path
