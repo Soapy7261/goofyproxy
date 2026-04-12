@@ -4,7 +4,7 @@ from typing import Self
 
 from goofy_client import GoofyClient
 from goofy_server import GoofyServer
-from audioio import AudioIo, AudioDeviceType, paudio_terminate
+from audioio import AudioIo, AudioDeviceType, Profile, paudio_terminate
 from common import *
 
 
@@ -52,24 +52,20 @@ def run(args: argparse.Namespace):
         raise Exception("invalid output audio device index")
 
     gio = AudioIo(
-        True,
         input_devices[args.input_device],
-        48000,
-        4096,
         output_devices[args.output_device],
-        48000,
-        4096
+        True,
+        Profile.Fast,
+        Profile.Fast
     )
 
     print("spinnin'")
     while True:
-        time.sleep(1.)
+        msg = input()
+        gio.send(msg.encode())
 
     if args.mode == "server":
-        GoofyServer(
-            gio,
-            log_level=LOG_CONFIG["level"]
-        )
+        GoofyServer(gio)
     elif args.mode == "client":
         if not args.port:
             print("port is required in client mode")
@@ -78,8 +74,7 @@ def run(args: argparse.Namespace):
         GoofyClient(
             gio,
             host="0.0.0.0",
-            port=args.port,
-            log_level=LOG_CONFIG["level"]
+            port=args.port
         )
     else:
         print("invalid mode")

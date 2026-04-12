@@ -2,15 +2,28 @@
 provides `AudioIo`, a `GoofyIo` child class for data transfer through audio.
 """
 
+import threading
 from enum import IntEnum
-from typing import NamedTuple, Mapping, Self
+from typing import NamedTuple, Mapping
 from dataclasses import dataclass
 
-import pyaudio
 import numpy as np
+from scipy import signal
+import pyaudio
 import zlib
 
 from goofyio import GoofyIo
+from common import *
+
+
+# audio oversampling factor
+OVERSAMPLE: int = 4
+
+# remove older outgoing packets that are already transmitted until we go below
+# the memory limit or reach the minimum outgoing packet count because we need to
+# keep the last few packets in case the other side asks for a retransmission.
+OUT_PACKETS_MEMORY_LIMIT = 512 * 1024 * 1024
+OUT_PACKETS_MIN_COUNT = 16
 
 
 class AudioDeviceType(IntEnum):
@@ -28,48 +41,9 @@ class AudioDevice(NamedTuple):
     is_default_output: bool
 
 
-class Modulation(IntEnum):
-    # binary phase shift keying: 0° and 180° (1 bits/symbol)
-    Bpsk = 0
-
-    # quadrature phase shift keying: 0°, 90°, 180°, 270° (2 bits/symbol)
-    Qpsk = 1
-
-    # quadrate amplitude modulation: 16 different combinations of phase and
-    # amplitude (4 bits/symbol)
-    Qam16 = 2
-
-    def bits_per_symbol(self) -> int:
-        if self == self.Bpsk:
-            return 1
-        elif self == self.Qpsk:
-            return 2
-        elif self == self.Qam16:
-            return 4
-        raise ValueError("invalid enum value")
-
-
-@dataclass
-class Carrier:
-    freq: np.float64
-    amp: np.float64
-    modulation: Modulation
-
-
-def total_bits_per_symbol(carriers: list[Carrier]) -> int:
-    bps = 0
-    for c in carriers:
-        bps += c.modulation.bits_per_symbol()
-    return bps
-
-
-SYMBOL_RATE = 200.
-SYMBOL_DURATION = 1. / SYMBOL_RATE
-
-PACKET_START_FREQ = 2000.
-
-TRAINING_BITS = 0b10101100  # 172
-ESCAPE = 0b11000001  # 193
+# NOTE: the training byte is always wrapped in two 0 bytes.
+TRAINING_BITS = 0b11111110  # 254
+ESCAPE = 0b10010111  # 151
 TRAINING_REPLACER = 0b11000010  # 194
 ESCAPE_REPLACER = 0b11000011  # 195
 
@@ -77,16 +51,18 @@ ESCAPE_REPLACER = 0b11000011  # 195
 class Packet:
     idx: int
     data: bytes
+    transmitted: bool = False
 
     def __init__(self, idx: int, data: bytes):
         self.idx = idx
         self.data = data
 
     def to_bytes(self) -> bytes:
-        # start with the training bits, used to learn the impulse and frequency
-        # response of the channel (environment) for room reverb cancelation and
-        # eliminating multi-path reflections.
-        raw = bytes([TRAINING_BITS])
+        # start with the training bits, used to find the beginning of a packet
+        # and learn the impulse frequency response of the channel (room reverb).
+        # the training byte is followed by a 0 byte to transmit silence for 8
+        # symbol durations.
+        raw = bytes([0, TRAINING_BITS, 0])
 
         # make sure the training byte doesn't appear in the actual data. we do
         # this by replacing every instance of the training byte by an escape
@@ -122,10 +98,37 @@ class Packet:
         # error correction scheme ever (majority voting).
         raw += header * 3
 
-        # and finally, the data itself
+        # the data itself
         raw += bytes(data)
 
+        # end with a zero
+        raw += b"\0"
+
         return raw
+
+
+class Profile(IntEnum):
+    Slowest = 0  # most reliable
+    Slow = 1
+    Medium = 2
+    Fast = 3
+    Fastest = 4  # requires ideal environment
+
+    def params(self, server_side: bool) -> tuple[float, float]:
+        """
+        returns the carrier frequency and symbol rate.
+        """
+        if self == self.Slowest:
+            return (4000., 400.) if server_side else (2400., 240.)
+        elif self == self.Slow:
+            return (8000., 1000.) if server_side else (5000., 625.)
+        elif self == self.Medium:
+            return (12000., 2000.) if server_side else (6000., 1000.)
+        elif self == self.Fast:
+            return (18000., 3000.) if server_side else (9000., 1500.)
+        elif self == self.Fastest:
+            return (20000., 4000.) if server_side else (9000., 1800.)
+        raise ValueError("invalid enum value")
 
 
 class AudioIo(GoofyIo):
@@ -136,46 +139,44 @@ class AudioIo(GoofyIo):
 
     # how data is modulated over audio
 
-    we use OFDM (orthogonal frequency division multiplexing) to utilize the
-    available bandwidth (2 kHz - 18 kHz) more efficiently. I know that sounds
-    like gibberish, so in simpler terms, we put several carriers with different
-    frequencies and use different modulation schemes for each one based on its
-    SNR (signal-to-noise ratio).
-
-    a carrier is simply a pure sine tone whose amplitude and phase are modified
-    over time to encode data. the rate at which we modify the amplitudes and
-    phases of the carriers is our "symbol rate". a single symbol can encode
-    multiple bits depending on the number of carriers and their modulation
-    schemes.
-
-    a modulation scheme provides a set of phase/amplitude combinations where
-    each one represents one possible state. for example, binary
-    phase-shift-keying or BPSK uses a 0° phase to encode a 0, and a 180° phase
-    to encode a 1. a more advanced scheme like QAM-16 (quadrate amplitude
-    modulation) uses 16 different phase/amplitude combinations (16 possible
-    states), giving us 4 bits per symbol for every carrier that uses this
-    scheme.
-
-    the total speed in bits/second is the sum of:
-    (bits/symbol for every modulation scheme)
-    x (number of carriers using that scheme)
-    x (symbol rate).
-
-    in general, higher-frequency carriers are less noisy and support more
-    complex modulation schemes with more bits per symbol.
+    the method we use here is very basic. we simply pick a carrier frequency
+    (e.g. 10 kHz) and turn it on (for 1) and off (for 0) really fast, depending
+    on the bits. so effectively we just multiply a pure sine tone by our bit
+    stream.
 
     # full-duplex
 
     for full-duplex (two-sided) communication, the two sides (e.g. server and
-    client) must use different sets of carriers whose frequencies do NOT
-    overlap. here, we make it asymmteric (like ADSL) and dedicate more carriers
-    with higher frequnecies to the server.
+    client) must use different carrier frequencies. here, we make it asymmetric
+    (like ADSL) and use a higher frequency carrier with a higher symbol rate for
+    the server .
     """
 
+    _log: logging.Logger
+
+    # True if running as the server side
+    _server_side: bool
+
+    # audio callback parameters
     _in_samprate: int
     _in_bufsize: int
     _out_samprate: int
     _out_bufsize: int
+
+    # input and output quality profiles
+    _in_profile: Profile
+    _out_profile: Profile
+
+    # input and output carrier frequencies
+    _in_carrier: float
+    _out_carrier: float
+
+    # input and output symbol rate (symbols/second)
+    _in_symrate: float
+    _out_symrate: float
+
+    # output volume
+    _out_volume: float
 
     _running: bool = False
     _istream: pyaudio.Stream | None = None
@@ -183,19 +184,20 @@ class AudioIo(GoofyIo):
 
     # precise amount of time in seconds passed since the first input or output
     # audio callback until the last callback.
-    _in_time = np.float64(0.)
-    _out_time = np.float64(0.)
+    _in_time: np.float64
+    _out_time: np.float64
 
-    # subcarrier list
-    _in_carriers: list[Carrier] = []
-    _out_carriers: list[Carrier] = []
+    _out_packets: list[Packet]
+    _out_packets_idx_offs: int = 0
+    _out_packet_idx: int = 0
+    _out_packets_lock: threading.Lock
 
-    # bits per symbol
-    _in_bits_per_symbol: int = 0
-    _out_bits_per_symbol: int = 0
+    _out_curr_packet: Packet | None = None
+    _out_curr_packet_bits: np.ndarray | None = None
+    _out_curr_packet_bit_offs: int = 0
 
-    _out_packet: Packet
-    _out_packet_bits: np.array
+    # input training clip, used to detect incoming packets
+    _in_training_clip: np.ndarray | None = None
 
     def list_devices(
         device_type: AudioDeviceType = AudioDeviceType.InputOutput
@@ -240,62 +242,62 @@ class AudioIo(GoofyIo):
 
     def __init__(
         self,
-        server_side: bool,  # True if running as the server, False for client.
         input_device: AudioDevice,
-        input_sample_rate: int,
-        input_buffer_size: int,
         output_device: AudioDevice,
-        output_sample_rate: int,
-        output_buffer_size: int
+        server_side: bool,  # True if running as the server side
+        input_profile: Profile,  # quality profile of the other side
+        output_profile: Profile,  # transmission quality profile
+        output_volume: float = .75
     ):
-        self._out_packet = Packet(23773, b"TAA, wassup brother")
-        self._out_packet_bits = np.unpackbits(np.frombuffer(
-            self._out_packet.to_bytes(),
-            dtype=np.uint8
-        ))
+        self._log = make_logger(f"AudioIo")
 
-        client_carriers: list[Carrier] = []
-        server_carriers: list[Carrier] = []
-        for i in range(23):
-            freq = np.float64(2250. + i * 250.)
-            client_carriers.append(Carrier(
-                freq,
-                np.float64(.1),
-                Modulation.Bpsk if freq < 3999. else Modulation.Qpsk
-            ))
-        for i in range(41):
-            server_carriers.append(Carrier(
-                np.float64(8000. + i * 250.),
-                np.float64(.08),
-                Modulation.Qam16
-            ))
-        self._in_carriers = client_carriers if server_side else server_carriers
-        self._out_carriers = server_carriers if server_side else client_carriers
+        self._server_side = server_side
+        self._in_samprate = 48000
+        self._in_bufsize = 4096
+        self._out_samprate = 48000
+        self._out_bufsize = 4096
 
-        self._in_bits_per_symbol = total_bits_per_symbol(self._in_carriers)
-        self._out_bits_per_symbol = total_bits_per_symbol(self._out_carriers)
+        self.set_input_profile(input_profile)
+        self.set_output_profile(output_profile)
 
-        self._in_samprate = input_sample_rate
-        self._in_bufsize = input_buffer_size
-        self._out_samprate = output_sample_rate
-        self._out_bufsize = output_buffer_size
+        self._out_volume = output_volume
+
+        self._in_time = np.float64(0.)
+        self._out_time = np.float64(0.)
+        self._out_packets = []
+        self._out_packets_lock = threading.Lock()
+
+        self._log.debug(
+            f"[input]\n"
+            f"  sample rate: {self._in_samprate:.1f} Hz\n"
+            f"  buffer size: {self._in_bufsize} samples "
+            f"  ({self._in_bufsize / self._in_samprate * 1000.:.1f} ms)\n"
+            f"  carrier freq: {self._in_carrier:.1f} Hz\n"
+            f"  symbol rate: {self._in_symrate:.1f} sym/s\n"
+            f"[output]\n"
+            f"  sample rate: {self._out_samprate} Hz\n"
+            f"  buffer size: {self._out_bufsize} samples "
+            f"  ({self._out_bufsize / self._out_samprate * 1000.:.1f} ms)\n"
+            f"  carrier freq: {self._out_carrier:.1f} Hz\n"
+            f"  symbol rate: {self._out_symrate:.1f} sym/s"
+        )
 
         self._istream = paudio().open(
-            rate=input_sample_rate,
+            rate=self._in_samprate,
             channels=1,
             format=pyaudio.paInt16,
             input=True,
             input_device_index=input_device.id,
-            frames_per_buffer=input_buffer_size,
+            frames_per_buffer=self._in_bufsize,
             stream_callback=self._input_callback
         )
         self._ostream = paudio().open(
-            rate=output_sample_rate,
+            rate=self._out_samprate,
             channels=1,
             format=pyaudio.paInt16,
             output=True,
             output_device_index=output_device.id,
-            frames_per_buffer=output_buffer_size,
+            frames_per_buffer=self._out_bufsize,
             stream_callback=self._output_callback
         )
 
@@ -328,11 +330,42 @@ class AudioIo(GoofyIo):
     def stop(self):
         self._running = False
 
+    def set_input_profile(self, profile: Profile):
+        self._in_profile = profile
+        self._in_carrier, self._in_symrate = self._in_profile.params(
+            not self._server_side
+        )
+        self._compute_input_training_clip()
+
+    def set_output_profile(self, profile: Profile):
+        self._out_profile = profile
+        self._out_carrier, self._out_symrate = self._out_profile.params(
+            self.server_side
+        )
+
     def _receive(self, size: int) -> bytes:
-        pass
+        raise NotImplementedError()
 
     def _send(self, data: bytes):
-        pass
+        force_acquire(self._out_packets_lock)
+
+        self._out_packets.append(Packet(
+            len(self._out_packets) + self._out_packets_idx_offs,
+            data
+        ))
+
+        # clean up old outgoing packets that are already transmitted.
+        total_size = 0
+        for packet in self._out_packets:
+            total_size += len(packet.data)
+        while total_size > OUT_PACKETS_MEMORY_LIMIT \
+                and len(self._out_packets) > OUT_PACKETS_MIN_COUNT \
+                and self._out_packets[0].transmitted:
+            total_size -= len(self._out_packets[0].data)
+            self._out_packets.pop(0)
+            self._out_packets_idx_offs += 1
+
+        self._out_packets_lock.release()
 
     def _input_callback(
         self,
@@ -348,9 +381,15 @@ class AudioIo(GoofyIo):
         # convert bytes to numpy float32 array
         samples = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) \
             / 32768.
+        
+        # oversample
+        samples = oversample(samples)
+
+        # cross-correlate with the training clip to detect incoming packets
+        np.correlate(self._in_training_clip, )
 
         rms = np.sqrt(np.mean(samples ** 2))
-        print(f"RMS: {rms:.2f}, n. samples: {len(samples)}")
+        # print(f"RMS: {rms:.2f}, n. samples: {len(samples)}")
 
         return (None, pyaudio.paContinue)
 
@@ -364,40 +403,109 @@ class AudioIo(GoofyIo):
         if not self._running:
             return (None, pyaudio.paAbort)
 
+        if self._out_curr_packet is None:
+            force_acquire(self._out_packets_lock)
+
+            # output silence until there's a new packet to transmit
+            self._out_packet_idx = max(
+                self._out_packet_idx,
+                self._out_packets_idx_offs
+            )
+            if self._out_packet_idx - self._out_packets_idx_offs \
+                    >= len(self._out_packets):
+                self._out_packets_lock.release()
+                return (np.zeros((frame_count,), np.int16), pyaudio.paContinue)
+
+            # got a new packet to transmit
+            self._out_curr_packet = self._out_packets[
+                self._out_packet_idx - self._out_packets_idx_offs
+            ]
+            self._out_curr_packet_bits = np.unpackbits(np.frombuffer(
+                self._out_curr_packet.to_bytes(),
+                dtype=np.uint8
+            ))
+            self._out_curr_packet_bit_offs = np.astype(
+                np.floor(self._out_time * self._out_symrate) + 1,
+                np.int32
+            )
+
+            self._out_packets_lock.release()
+
         # time since the beginning of the stream
-        t = np.arange(frame_count, dtype=np.float64) / self._out_samprate \
-            + self._out_time
+        t = np.arange(
+            frame_count * OVERSAMPLE,
+            dtype=np.float64
+        ) / self._out_samprate / OVERSAMPLE + self._out_time
 
-        # transmit packet start frequency for 4 symbol durations
-        samples = .9 * np.sin(
-            2. * np.pi * PACKET_START_FREQ * t
-        ) * (t < SYMBOL_DURATION * 4)
+        # bit index for each sample
+        bit_indices = np.clip(
+            np.astype(np.floor(t * self._out_symrate), np.int32)
+            - self._out_curr_packet_bit_offs,
+            0,
+            len(self._out_curr_packet_bits) - 1
+        )
 
-        # keep silent after the packet start frequency for another 4 symbol
-        # durations (8 symbol durations in total).
-        symbol_idx = np.astype(np.floor(t * SYMBOL_RATE - 8), np.int32)
+        # actual bit value for each sample (0 or 1)
+        bit_values = self._out_curr_packet_bits[bit_indices]
 
-        # bit indices: a 2D array where the second axis has a size of
-        # self._out_bits_per_symbol and contains bit indices in the raw packet.
-        bit_indices = np.stack([
-            symbol_idx * self._out_bits_per_symbol + i
-            for i in range(self._out_bits_per_symbol)
-        ], axis=1)
-        bit_indices = np.clip(bit_indices, 0, len(self._out_packet_bits) - 1)
+        # sine wave * bits
+        samples = self._out_volume * np.sin(
+            2. * np.pi * self._out_carrier * t
+        ) * bit_values
 
-        # a 2D array where the second axis contains the actual bits (0 or 1) for
-        # each sample's corresponding symbol.
-        bits = self._out_packet_bits[bit_indices]
+        # un-oversample
+        samples = downsample(samples)
 
-        # TODO: OFDM modulation. will implement myself. you only implement the
-        # two ellipsis above.
-
+        # update _out_time
         buf_duration = float(frame_count) / self._out_samprate
         self._out_time += buf_duration
+
+        # see if we reached the end of the packet
+        if bit_indices[-1] >= len(self._out_curr_packet_bits) - 1:
+            force_acquire(self._out_packets_lock)
+
+            self._out_curr_packet.transmitted = True
+            self._out_curr_packet = None
+            self._out_curr_packet_bits = None
+
+            self._out_packet_idx += 1
+
+            self._out_packets_lock.release()
 
         # convert to 16-bit integers
         samples_i16 = (samples * 32767.).astype(np.int16)
         return (samples_i16.tobytes(), pyaudio.paContinue)
+
+    def _compute_input_training_clip(self):
+        """
+        compute the input training clip used to detect incoming packets.
+        """
+
+        # the actual bits
+        bits = np.unpackbits(np.frombuffer(
+            bytes([0, TRAINING_BITS, 0]),
+            dtype=np.uint8
+        ))
+
+        # time
+        t = np.arange(
+            len(bits) / self._in_symrate * self._in_samprate * OVERSAMPLE
+        ) / self._in_samprate / OVERSAMPLE
+
+        # bit index for each sample
+        bit_indices = np.clip(
+            np.astype(np.floor(t * self._in_symrate), np.int32),
+            0,
+            len(bits) - 1
+        )
+
+        # actual bit value for each sample (0 or 1)
+        bit_values = bits[bit_indices]
+
+        # sine wave * bits
+        self._in_training_clip = np.sin(
+            2. * np.pi * self._in_carrier * t
+        ) * bit_values
 
 
 _paudio_instance: pyaudio.PyAudio | None = None
@@ -464,3 +572,21 @@ def mvec_correct(received: bytes, size: int) -> bytes:
                 result[byte_idx] |= (1 << (7 - bit_idx))
 
     return bytes(result)
+
+
+def oversample(samples: np.ndarray) -> np.ndarray:
+    return signal.resample_poly(
+        samples,
+        OVERSAMPLE,
+        1,
+        window=('kaiser', 14)
+    )
+
+
+def downsample(samples: np.ndarray) -> np.ndarray:
+    return signal.resample_poly(
+        samples,
+        1,
+        OVERSAMPLE,
+        window=('kaiser', 14)
+    )
