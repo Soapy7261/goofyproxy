@@ -54,11 +54,11 @@ class GoofyServer:
 
     _running: bool = False
 
-    _sockets: dict[int, GoofyServerSocket] = {}
-    _sockets_lock = threading.Lock()
+    _sockets: dict[int, GoofyServerSocket]
+    _sockets_lock: threading.Lock
 
-    _udp_relays: dict[int, GoofyServerUdpRelay] = {}
-    _udp_relays_lock = threading.Lock()
+    _udp_relays: dict[int, GoofyServerUdpRelay]
+    _udp_relays_lock: threading.Lock
 
     """
     thread flow
@@ -91,18 +91,26 @@ class GoofyServer:
     # accumulate outgoing GoofyPackets from different threads and send them all
     # at once on the send thread. helps with avoiding sending many small
     # messages instead of fewer, larger messages.
-    _outgoing_packet_queue: list[GoofyPacket] = []
-    _outgoing_packet_queue_lock = threading.Lock()
+    _outgoing_packet_queue: list[GoofyPacket]
+    _outgoing_packet_queue_lock: threading.Lock
 
     def __init__(
         self,
         io: GoofyIo,
-        send_interval: float = .001,
-        log_level: int = LOG_CONFIG["level"]
+        send_interval: float = .001
     ) -> None:
         self.io = io
         self.send_interval = send_interval
-        self.log = make_logger(f"goofy server", log_level)
+        self.log = make_logger(f"goofy server")
+
+        self._sockets = {}
+        self._sockets_lock = threading.Lock()
+
+        self._udp_relays = {}
+        self._udp_relays_lock = threading.Lock()
+
+        self._outgoing_packet_queue = []
+        self._outgoing_packet_queue_lock = threading.Lock()
 
         sockets_locked = False
         try:

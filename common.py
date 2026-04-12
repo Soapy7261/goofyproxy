@@ -75,7 +75,7 @@ class Formatter(logging.Formatter):
         if LOG_CONFIG["colorize"]:
             color = COL_RESET
             if record.levelno >= logging.FATAL:
-                color = COL_BRIGHT_RED
+                color = COL_RED
             elif record.levelno >= logging.ERROR:
                 color = COL_RED
             elif record.levelno >= logging.WARNING:
@@ -96,7 +96,9 @@ log_handler = logging.StreamHandler(sys.stdout)
 log_handler.setFormatter(log_formatter)
 
 
-def make_logger(name: str, level: int = LOG_CONFIG["level"]) -> logging.Logger:
+def make_logger(name: str, level: int | None = None) -> logging.Logger:
+    if level is None:
+        level = LOG_CONFIG["level"]
     l = logging.Logger(name, level)
     l.addHandler(log_handler)
     return l
