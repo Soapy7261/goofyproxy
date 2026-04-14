@@ -8,6 +8,12 @@ from audioio import AudioIo, AudioDeviceType, Profile, paudio_terminate
 from common import *
 
 
+def sendcin(gio: AudioIo):
+    while True:
+        msg = input()
+        gio.send(msg.encode())
+
+
 def run(args: argparse.Namespace):
     if args.mode == "list_audio_devices":
         input_devices = AudioIo.list_devices(AudioDeviceType.Input)
@@ -55,14 +61,29 @@ def run(args: argparse.Namespace):
         input_devices[args.input_device],
         output_devices[args.output_device],
         True,
-        Profile.Fast,
-        Profile.Fast
+        Profile.Slowest,
+        Profile.Slowest,
+        .2
     )
 
+    threading.Thread(target=sendcin, args=(gio,)).start()
+
     print("spinnin'")
-    while True:
-        msg = input()
-        gio.send(msg.encode())
+    if True:
+        import matplotlib.pyplot as plt
+
+        while gio._in_inverse_ir is None:
+            time.sleep(.1)
+
+        fig, axes = plt.subplots(2, 1, figsize=(8, 10))
+        axes[-1].set_xlabel('t')
+
+        axes[0].plot(gio._in_inverse_ir)
+        axes[0].set_title('Inverse IR')
+        axes[0].set_ylabel('y')
+
+        plt.tight_layout()
+        plt.show()
 
     if args.mode == "server":
         GoofyServer(gio)

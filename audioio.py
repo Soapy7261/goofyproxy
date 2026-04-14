@@ -5,10 +5,11 @@ provides `AudioIo`, a `GoofyIo` child class for data transfer through audio.
 import threading
 from enum import IntEnum
 from typing import NamedTuple, Mapping
-from dataclasses import dataclass
 
 import numpy as np
 from scipy import signal
+from scipy import fft
+
 import pyaudio
 import zlib
 
@@ -16,14 +17,22 @@ from goofyio import GoofyIo
 from common import *
 
 
-# audio oversampling factor
-OVERSAMPLE: int = 4
+# audio oversampling factor for input and output
+IOVERSAMPLE: int = 2
+OOVERSAMPLE: int = 4
 
 # remove older outgoing packets that are already transmitted until we go below
 # the memory limit or reach the minimum outgoing packet count because we need to
 # keep the last few packets in case the other side asks for a retransmission.
 OUT_PACKETS_MEMORY_LIMIT = 512 * 1024 * 1024
 OUT_PACKETS_MIN_COUNT = 16
+
+# how many periods of the marker frequency to play for the packet start marker.
+# NOTE: both sides must use the same value.
+MARKER_PERIODS = 80
+
+# numeric data type for audio samples
+Float = np.float32
 
 
 class AudioDeviceType(IntEnum):
@@ -41,13 +50,6 @@ class AudioDevice(NamedTuple):
     is_default_output: bool
 
 
-# NOTE: the training byte is always wrapped in two 0 bytes.
-TRAINING_BITS = 0b11111110  # 254
-ESCAPE = 0b10010111  # 151
-TRAINING_REPLACER = 0b11000010  # 194
-ESCAPE_REPLACER = 0b11000011  # 195
-
-
 class Packet:
     idx: int
     data: bytes
@@ -58,53 +60,22 @@ class Packet:
         self.data = data
 
     def to_bytes(self) -> bytes:
-        # start with the training bits, used to find the beginning of a packet
-        # and learn the impulse frequency response of the channel (room reverb).
-        # the training byte is followed by a 0 byte to transmit silence for 8
-        # symbol durations.
-        raw = bytes([0, TRAINING_BITS, 0])
-
-        # make sure the training byte doesn't appear in the actual data. we do
-        # this by replacing every instance of the training byte by an escape
-        # byte followed by a replacer code for the training byte. for every
-        # coincidential instance of the escape byte itself in the actual data,
-        # we add a different replacer code after the escape byte. example:
-        # [before]
-        # ..., TRAINING_BITS, ..., ESCAPE (coincidential), ...
-        # [after]
-        # ..., ESCAPE, TRAINING_REPLACER, ..., ESCAPE, ESCAPE_REPLACER, ...
-        data = bytearray(self.data)
-        i = 0
-        while i < len(data):
-            if data[i] == ESCAPE:
-                data.insert(i + 1, ESCAPE_REPLACER)
-                i += 2
-                continue
-            elif data[i] == TRAINING_BITS:
-                data[i] = ESCAPE
-                data.insert(i + 1, TRAINING_REPLACER)
-                i += 2
-                continue
-            i += 1
-
         # header: packet index, data checksum, data length
-        checksum = zlib.crc32(data) % 2**16
+        checksum = zlib.crc32(self.data) % 2**16
         header = \
             self.idx.to_bytes(2) \
             + checksum.to_bytes(2) \
             + len(self.data).to_bytes(2)
 
-        # add the header. repeated 3 times because we're using the most naive
-        # error correction scheme ever (majority voting).
-        raw += header * 3
+        # repeat the header 3 times because we're using the most naive error
+        # correction scheme ever (majority voting).
+        return header * 3 + self.data
 
-        # the data itself
-        raw += bytes(data)
 
-        # end with a zero
-        raw += b"\0"
-
-        return raw
+class ModulationParams(NamedTuple):
+    carrier: float  # carrier frequency
+    symrate: float  # symbol rate
+    marker: float  # packet start marker frequency
 
 
 class Profile(IntEnum):
@@ -114,21 +85,29 @@ class Profile(IntEnum):
     Fast = 3
     Fastest = 4  # requires ideal environment
 
-    def params(self, server_side: bool) -> tuple[float, float]:
-        """
-        returns the carrier frequency and symbol rate.
-        """
+    def params(self, server_side: bool) -> ModulationParams:
         if self == self.Slowest:
-            return (4000., 400.) if server_side else (2400., 240.)
+            return ModulationParams(4000., 400., 1700.) if server_side \
+                else ModulationParams(2400., 240., 1200.)
         elif self == self.Slow:
-            return (8000., 1000.) if server_side else (5000., 625.)
+            return ModulationParams(8000., 1000., 3500.) if server_side \
+                else ModulationParams(5000., 625., 2800.)
         elif self == self.Medium:
-            return (12000., 2000.) if server_side else (6000., 1000.)
+            return ModulationParams(12000., 2000., 4500.) if server_side \
+                else ModulationParams(6000., 1000., 3800.)
         elif self == self.Fast:
-            return (18000., 3000.) if server_side else (9000., 1500.)
+            return ModulationParams(18000., 3000., 6000.) if server_side \
+                else ModulationParams(9000., 1500., 4500.)
         elif self == self.Fastest:
-            return (20000., 4000.) if server_side else (9000., 1800.)
+            return ModulationParams(20000., 4000., 6500.) if server_side \
+                else ModulationParams(9000., 1800., 5000.)
         raise ValueError("invalid enum value")
+
+
+class InputState(IntEnum):
+    WaitingForMarker = 0
+    ReadingHeader = 1
+    ReadingPayload = 2
 
 
 class AudioIo(GoofyIo):
@@ -142,14 +121,24 @@ class AudioIo(GoofyIo):
     the method we use here is very basic. we simply pick a carrier frequency
     (e.g. 10 kHz) and turn it on (for 1) and off (for 0) really fast, depending
     on the bits. so effectively we just multiply a pure sine tone by our bit
-    stream.
+    stream. we use oversampling to avoid aliasing.
+
+    # packet start markers
+
+    before each packet, we transmit a marker. a marker is basically a sine tone
+    at the marker frequency for MARKER_PERIODS periods wrapped in MARKER_PERIODS
+    periods of silence before and after it. we also play the carrier frequency
+    at the same time:
+    1. silence for "MARKER_PERIODS / marker frequency" seconds
+    2. marker + carrier frequency together for the same duration
+    3. silence for the same duration
 
     # full-duplex
 
     for full-duplex (two-sided) communication, the two sides (e.g. server and
-    client) must use different carrier frequencies. here, we make it asymmetric
-    (like ADSL) and use a higher frequency carrier with a higher symbol rate for
-    the server .
+    client) must use different carrier and marker frequencies. here, we make it
+    asymmetric (like ADSL) and use higher frequency carriers with higher symbol
+    rates for the server.
     """
 
     _log: logging.Logger
@@ -167,13 +156,12 @@ class AudioIo(GoofyIo):
     _in_profile: Profile
     _out_profile: Profile
 
-    # input and output carrier frequencies
-    _in_carrier: float
-    _out_carrier: float
+    # input and output modulation parameters
+    _in_mod: ModulationParams
+    _out_mod: ModulationParams
 
-    # input and output symbol rate (symbols/second)
-    _in_symrate: float
-    _out_symrate: float
+    # used for smoothing out the correlation of input buffer and the marker clip
+    _in_cor_hanning_smooth_kernel: np.ndarray | None = None
 
     # output volume
     _out_volume: float
@@ -182,10 +170,13 @@ class AudioIo(GoofyIo):
     _istream: pyaudio.Stream | None = None
     _ostream: pyaudio.Stream | None = None
 
-    # precise amount of time in seconds passed since the first input or output
-    # audio callback until the last callback.
-    _in_time: np.float64
-    _out_time: np.float64
+    # precise amount of time in seconds passed since the end of the last input
+    # marker detected. this represents the time at _in_buf[0].
+    _in_time: Float
+
+    # precise amount of time in seconds passed since the start of the last
+    # output packet.
+    _out_time: Float
 
     _out_packets: list[Packet]
     _out_packets_idx_offs: int = 0
@@ -194,10 +185,14 @@ class AudioIo(GoofyIo):
 
     _out_curr_packet: Packet | None = None
     _out_curr_packet_bits: np.ndarray | None = None
-    _out_curr_packet_bit_offs: int = 0
 
-    # input training clip, used to detect incoming packets
-    _in_training_clip: np.ndarray | None = None
+    # input marker clip, used to detect incoming packets
+    _in_marker_clip: np.ndarray | None = None
+    _in_marker_clip_fft: np.ndarray | None = None
+
+    _in_buf: np.ndarray | None = None
+    _in_state: InputState = InputState.WaitingForMarker
+    _in_inverse_ir: np.ndarray | None = None
 
     def list_devices(
         device_type: AudioDeviceType = AudioDeviceType.InputOutput
@@ -235,8 +230,8 @@ class AudioIo(GoofyIo):
 
         # make sure the default output device comes first, followed by the
         # default input device, if any are present.
-        devices.sort(key=lambda device: 0 if device.is_default_input else 1)
-        devices.sort(key=lambda device: 0 if device.is_default_output else 1)
+        devices.sort(key=lambda d: 0 if d.is_default_input else 1)
+        devices.sort(key=lambda d: 0 if d.is_default_output else 1)
 
         return devices
 
@@ -262,24 +257,24 @@ class AudioIo(GoofyIo):
 
         self._out_volume = output_volume
 
-        self._in_time = np.float64(0.)
-        self._out_time = np.float64(0.)
+        self._in_time = Float(0.)
+        self._out_time = Float(0.)
         self._out_packets = []
         self._out_packets_lock = threading.Lock()
+
+        self._in_buf = np.zeros(0, dtype=Float)
 
         self._log.debug(
             f"[input]\n"
             f"  sample rate: {self._in_samprate:.1f} Hz\n"
             f"  buffer size: {self._in_bufsize} samples "
             f"  ({self._in_bufsize / self._in_samprate * 1000.:.1f} ms)\n"
-            f"  carrier freq: {self._in_carrier:.1f} Hz\n"
-            f"  symbol rate: {self._in_symrate:.1f} sym/s\n"
+            f"  modulation: {self._in_mod}\n"
             f"[output]\n"
             f"  sample rate: {self._out_samprate} Hz\n"
             f"  buffer size: {self._out_bufsize} samples "
             f"  ({self._out_bufsize / self._out_samprate * 1000.:.1f} ms)\n"
-            f"  carrier freq: {self._out_carrier:.1f} Hz\n"
-            f"  symbol rate: {self._out_symrate:.1f} sym/s"
+            f"  modulation: {self._out_mod}"
         )
 
         self._istream = paudio().open(
@@ -332,16 +327,18 @@ class AudioIo(GoofyIo):
 
     def set_input_profile(self, profile: Profile):
         self._in_profile = profile
-        self._in_carrier, self._in_symrate = self._in_profile.params(
-            not self._server_side
-        )
-        self._compute_input_training_clip()
+        self._in_mod = self._in_profile.params(not self._server_side)
+
+        self._in_cor_hanning_smooth_kernel = hanning_smooth_kernel(int(
+            .25 * MARKER_PERIODS / self._in_mod.marker
+            * self._in_samprate * IOVERSAMPLE
+        ))
+
+        self._compute_input_marker_clip()
 
     def set_output_profile(self, profile: Profile):
         self._out_profile = profile
-        self._out_carrier, self._out_symrate = self._out_profile.params(
-            self.server_side
-        )
+        self._out_mod = self._out_profile.params(self._server_side)
 
     def _receive(self, size: int) -> bytes:
         raise NotImplementedError()
@@ -374,24 +371,161 @@ class AudioIo(GoofyIo):
         time_info: Mapping[str, float],
         status: int
     ) -> tuple[bytes | None, int]:
-        if not (self._running and in_data and frame_count > 1):
+        if not (self._running and in_data and frame_count > 0):
             self._running = False
+            self._in_buf = None
             return (None, pyaudio.paAbort)
 
-        # convert bytes to numpy float32 array
-        samples = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) \
+        # just some constants for later
+        real_samprate = self._in_samprate * IOVERSAMPLE
+        marker_duration = len(self._in_marker_clip) / real_samprate
+
+        # convert to numpy float array
+        samples = np.frombuffer(in_data, dtype=np.int16).astype(Float) \
             / 32768.
-        
-        # oversample
-        samples = oversample(samples)
 
-        # cross-correlate with the training clip to detect incoming packets
-        np.correlate(self._in_training_clip, )
+        # oversample and add to the buffer
+        samples = oversample(samples, IOVERSAMPLE)
+        self._in_buf = np.concatenate((self._in_buf, samples))
 
-        rms = np.sqrt(np.mean(samples ** 2))
-        # print(f"RMS: {rms:.2f}, n. samples: {len(samples)}")
+        if self._in_state == InputState.WaitingForMarker:
+            # continue until we have enough samples in the buffer
+            if len(self._in_buf) < len(self._in_marker_clip) * 1.1:
+                return (None, pyaudio.paContinue)
 
-        return (None, pyaudio.paContinue)
+            # compute marker and input buffer norm for normalization
+            marker_norm = np.linalg.norm(self._in_marker_clip)
+            in_norm = np.linalg.norm(self._in_buf)
+
+            # skip if the absolute norm of the input buffer (divided by its
+            # duration) is too low.
+            if in_norm / (len(self._in_buf) / real_samprate) < 5.:
+                self._in_buf_pop(len(self._in_marker_clip))
+                return (None, pyaudio.paContinue)
+
+            # normalized cross-correlation
+            cor = np.abs(
+                signal.correlate(
+                    self._in_buf,
+                    self._in_marker_clip,
+                    'same'
+                ) / (in_norm * marker_norm)
+            )
+
+            # smooth out
+            cor_smoothed = signal.convolve(
+                cor,
+                self._in_cor_hanning_smooth_kernel,
+                'same'
+            )
+
+            # find the average correlation value in places where it's lower than
+            # the total mean (basically the overall minimum-ish value).
+            cor_mean = np.mean(cor_smoothed)
+            cor_lower_than_mean = cor_smoothed * (cor_smoothed < cor_mean)
+            if len(cor_lower_than_mean) > 0:
+                cor_min = \
+                    .5 * (np.mean(cor_lower_than_mean) + np.min(cor_smoothed))
+            else:
+                cor_min = np.min(cor_mean)
+
+            # find rising and falling intervals
+            high_cor = cor_smoothed > cor_min * 8.
+            edges = np.diff(high_cor.astype(np.int8))
+            rising = np.where(edges == 1)[0] + 1
+            falling = np.where(edges == -1)[0] + 1
+            intervals: list[tuple[int, int]] = []
+            for rise_idx in rising:
+                fall_idx = -1
+                for i in falling:
+                    if i > rise_idx:
+                        fall_idx = i
+                        break
+                if fall_idx == -1:
+                    continue
+                intervals.append((rise_idx, fall_idx))
+
+            # try to find an interval where the distance between rising and
+            # falling matches the expected duration (find the last one if more
+            # than one).
+            expected_n_samples = \
+                2. * MARKER_PERIODS / self._in_mod.marker * real_samprate
+            interval: tuple[int, int] | None = None
+            for rise_idx, fall_idx in intervals:
+                n_samples = fall_idx - rise_idx
+                if n_samples > .7 * expected_n_samples \
+                        and n_samples < 1.43 * expected_n_samples:
+                    interval = (rise_idx, fall_idx)
+
+            # no interval found with a high enough correlation for the right
+            # duration.
+            if not interval:
+                self._in_buf_pop(len(self._in_marker_clip))
+                return (None, pyaudio.paContinue)
+
+            # congratulations! we've detected a marker!
+            self._in_state = InputState.ReadingHeader
+
+            # isolate the received marker clip, ensuring the same size as
+            # _in_marker_clip.
+            received_marker = self._in_buf[interval[0]:interval[1] + 1]
+            len_diff = len(received_marker) - len(self._in_marker_clip)
+            len_diff_small_half = abs(len_diff) // 2
+            len_diff_big_half = abs(len_diff) - len_diff_small_half
+            if len_diff > 0:
+                received_marker = received_marker[
+                    len_diff_big_half:-len_diff_small_half
+                ]
+            elif len_diff < 0:
+                received_marker = np.pad(
+                    received_marker,
+                    (len_diff_small_half, len_diff_big_half),
+                    mode="reflect"
+                )
+
+            # we now have the ideal marker clip (_in_marker_clip) and what we've
+            # received from the input device (received_marker), so we can use
+            # deconvolution to compute the impulse response (and therefore also
+            # frequency response) of the channel (e.g. room reverb) and its
+            # inverse and use it to eliminate echoes and reverb tails when
+            # reading symbols.
+            self._in_inverse_ir = fft.ifft(
+                self._in_marker_clip_fft / fft.fft(received_marker)
+            )
+
+            # calculate the ending time of the detected marker
+            rise_t = interval[0] / real_samprate
+            fall_t = interval[1] / real_samprate
+            middle_t = .5 * (rise_t + fall_t)
+            marker_end_t = middle_t + (.5 * marker_duration)
+
+            # pop the input buffer until the marker end
+            self._in_buf_pop(int(marker_end_t * real_samprate))
+
+            # reset _in_time
+            self._in_time = Float(0.)
+
+            # the data always has a constant 0 bit at the start so the real
+            # start time is one symbol after the marker.
+            self._in_data_start_time = 1. / self._in_mod.symrate
+
+            return (None, pyaudio.paContinue)
+        elif self._in_state == InputState.ReadingHeader:
+            # time since the end of the marker
+            t = np.arange(len(self._in_buf), dtype=Float) / real_samprate \
+                + (self._in_time - self._in_data_start_time)
+
+            # apply _in_inverse_channel_ir convolution
+            # TAA()
+
+            # chop up into symbol-duration-long clips and correlate each one
+            # with the carrier frequency.
+            # TAA()
+
+            return (None, pyaudio.paContinue)
+        elif self._in_state == InputState.ReadingPayload:
+            return (None, pyaudio.paContinue)
+        raise ValueError("invalid enum value")
 
     def _output_callback(
         self,
@@ -420,27 +554,39 @@ class AudioIo(GoofyIo):
             self._out_curr_packet = self._out_packets[
                 self._out_packet_idx - self._out_packets_idx_offs
             ]
-            self._out_curr_packet_bits = np.unpackbits(np.frombuffer(
-                self._out_curr_packet.to_bytes(),
-                dtype=np.uint8
-            ))
-            self._out_curr_packet_bit_offs = np.astype(
-                np.floor(self._out_time * self._out_symrate) + 1,
-                np.int32
+            self._out_curr_packet_bits = np.pad(
+                np.unpackbits(np.frombuffer(
+                    self._out_curr_packet.to_bytes(),
+                    dtype=np.uint8
+                )),
+                (1,),
+                'constant',
+                constant_values=(0,)
             )
+            self._out_time = Float(0.)
 
             self._out_packets_lock.release()
 
-        # time since the beginning of the stream
+        # time since the beginning of the packet
         t = np.arange(
-            frame_count * OVERSAMPLE,
-            dtype=np.float64
-        ) / self._out_samprate / OVERSAMPLE + self._out_time
+            frame_count * OOVERSAMPLE,
+            dtype=Float
+        ) / (self._out_samprate * OOVERSAMPLE) + self._out_time
+
+        # packet start marker: transmit marker frequency and carrier frequency
+        # together, followed and preceded by silence for the same duration.
+        marker_duration = MARKER_PERIODS * 3. / self._out_mod.marker
+        marker_mask = \
+            (t - marker_duration * .5) < (MARKER_PERIODS / self._out_mod.marker)
+        samples = \
+            np.sin(2. * np.pi * self._out_mod.marker * t) * marker_mask \
+            + np.sin(2. * np.pi * self._out_mod.carrier * t) * marker_mask
 
         # bit index for each sample
         bit_indices = np.clip(
-            np.astype(np.floor(t * self._out_symrate), np.int32)
-            - self._out_curr_packet_bit_offs,
+            np.astype(np.floor(
+                (t - marker_duration) * self._out_mod.symrate
+            ), np.int32),
             0,
             len(self._out_curr_packet_bits) - 1
         )
@@ -448,13 +594,16 @@ class AudioIo(GoofyIo):
         # actual bit value for each sample (0 or 1)
         bit_values = self._out_curr_packet_bits[bit_indices]
 
-        # sine wave * bits
-        samples = self._out_volume * np.sin(
-            2. * np.pi * self._out_carrier * t
+        # modulate the carrier
+        samples += np.sin(
+            2. * np.pi * self._out_mod.carrier * t
         ) * bit_values
 
         # un-oversample
-        samples = downsample(samples)
+        samples = downsample(samples, OOVERSAMPLE)
+
+        # volume and clip
+        samples = np.clip(samples * self._out_volume, -1., 1.)
 
         # update _out_time
         buf_duration = float(frame_count) / self._out_samprate
@@ -476,36 +625,29 @@ class AudioIo(GoofyIo):
         samples_i16 = (samples * 32767.).astype(np.int16)
         return (samples_i16.tobytes(), pyaudio.paContinue)
 
-    def _compute_input_training_clip(self):
+    def _compute_input_marker_clip(self):
         """
-        compute the input training clip used to detect incoming packets.
+        compute the input marker clip used to detect incoming packets.
         """
 
-        # the actual bits
-        bits = np.unpackbits(np.frombuffer(
-            bytes([0, TRAINING_BITS, 0]),
-            dtype=np.uint8
-        ))
+        duration = MARKER_PERIODS * 3. / self._in_mod.marker
 
-        # time
         t = np.arange(
-            len(bits) / self._in_symrate * self._in_samprate * OVERSAMPLE
-        ) / self._in_samprate / OVERSAMPLE
+            int(duration * self._in_samprate * IOVERSAMPLE)
+        ) / self._in_samprate / IOVERSAMPLE
 
-        # bit index for each sample
-        bit_indices = np.clip(
-            np.astype(np.floor(t * self._in_symrate), np.int32),
-            0,
-            len(bits) - 1
-        )
+        mask = (t - duration * .5) < (MARKER_PERIODS / self._in_mod.marker * .5)
+        self._in_marker_clip = (
+            np.sin(2. * np.pi * self._in_mod.marker * t)
+            + np.sin(2. * np.pi * self._in_mod.carrier * t)
+        ) * mask
 
-        # actual bit value for each sample (0 or 1)
-        bit_values = bits[bit_indices]
+        self._in_marker_clip_fft = fft.fft(self._in_marker_clip)
 
-        # sine wave * bits
-        self._in_training_clip = np.sin(
-            2. * np.pi * self._in_carrier * t
-        ) * bit_values
+    def _in_buf_pop(self, n_samples: int):
+        actual_n = min(n_samples, len(self._in_buf))
+        self._in_time += actual_n / self._in_samprate / IOVERSAMPLE
+        self._in_buf = self._in_buf[actual_n:]
 
 
 _paudio_instance: pyaudio.PyAudio | None = None
@@ -574,19 +716,29 @@ def mvec_correct(received: bytes, size: int) -> bytes:
     return bytes(result)
 
 
-def oversample(samples: np.ndarray) -> np.ndarray:
+def oversample(samples: np.ndarray, factor: int) -> np.ndarray:
     return signal.resample_poly(
         samples,
-        OVERSAMPLE,
+        factor,
         1,
         window=('kaiser', 14)
     )
 
 
-def downsample(samples: np.ndarray) -> np.ndarray:
+def downsample(samples: np.ndarray, factor: int) -> np.ndarray:
     return signal.resample_poly(
         samples,
         1,
-        OVERSAMPLE,
+        factor,
         window=('kaiser', 14)
     )
+
+
+def hanning_smooth(a: np.ndarray, n: int) -> np.ndarray:
+    h = np.hanning(n)
+    return np.convolve(a, h / np.sum(h), 'same')
+
+
+def hanning_smooth_kernel(n: int) -> np.ndarray:
+    h = np.hanning(n)
+    return h / np.sum(h)
