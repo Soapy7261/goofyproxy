@@ -75,7 +75,7 @@ class Formatter(logging.Formatter):
         if LOG_CONFIG["colorize"]:
             color = COL_RESET
             if record.levelno >= logging.FATAL:
-                color = COL_RED
+                color = COL_BRIGHT_RED
             elif record.levelno >= logging.ERROR:
                 color = COL_RED
             elif record.levelno >= logging.WARNING:

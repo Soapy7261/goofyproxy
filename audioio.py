@@ -2,6 +2,7 @@
 provides `AudioIo`, a `GoofyIo` child class for data transfer through audio.
 """
 
+import time
 import threading
 from enum import IntEnum
 from typing import NamedTuple, Mapping
@@ -29,7 +30,15 @@ OUT_PACKETS_MIN_COUNT = 16
 
 # how many periods of the marker frequency to play for the packet start marker.
 # NOTE: both sides must use the same value.
-MARKER_PERIODS = 80
+MARKER_PERIODS = 200
+
+# once we have (N_GUARD_SYMBOLS + 1) symbols in the input buffer, we read the
+# last one after convolving with the inverse IR of the room (for reverb
+# cancelation). that means the first N_GUARD_SYMBOLS bits are always ignored,
+# so we account for this in the output and always transmit N_GUARD_SYMBOLS zero
+# bits before real data.
+# NOTE: both sides must use the same value.
+N_GUARD_SYMBOLS = 8
 
 # numeric data type for audio samples
 Float = np.float32
@@ -50,26 +59,58 @@ class AudioDevice(NamedTuple):
     is_default_output: bool
 
 
+"""
+packet header (8 bytes):
+[2 bytes] header checksum
+[2 bytes] packet index
+[2 bytes] packet data checksum
+[2 bytes] packet data length
+
+retransmission request header (8 bytes):
+[2 bytes] header checksum
+[2 bytes] constant: RETRANSMIT_REQ_PACKET_IDX
+[2 bytes] index of the packet to start retransmitting from
+[2 bytes] constant: 0
+"""
+
+PACKET_HEADER_BYTES: int = 8
+PACKET_IDX_MAX = 64000
+RETRANSMIT_REQ_PACKET_IDX = 65000  # must be bigger than PACKET_IDX_MAX
+
+
 class Packet:
     idx: int
     data: bytes
     transmitted: bool = False
 
     def __init__(self, idx: int, data: bytes):
+        if idx > PACKET_IDX_MAX:
+            raise ValueError("invalid packet index (too large)")
         self.idx = idx
         self.data = data
 
     def to_bytes(self) -> bytes:
-        # header: packet index, data checksum, data length
-        checksum = zlib.crc32(self.data) % 2**16
         header = \
             self.idx.to_bytes(2) \
-            + checksum.to_bytes(2) \
+            + compute_checksum(self.data).to_bytes(2) \
             + len(self.data).to_bytes(2)
 
-        # repeat the header 3 times because we're using the most naive error
-        # correction scheme ever (majority voting).
-        return header * 3 + self.data
+        header_checksum = compute_checksum(header)
+        header = header_checksum.to_bytes(2) + header
+
+        return header + self.data
+
+
+def make_retransmission_request_header(idx: int) -> bytes:
+    header = \
+        RETRANSMIT_REQ_PACKET_IDX.to_bytes(2) \
+        + idx.to_bytes(2) \
+        + b"\0\0"
+
+    header_checksum = compute_checksum(header)
+    header = header_checksum.to_bytes(2) + header
+
+    return header
 
 
 class ModulationParams(NamedTuple):
@@ -87,6 +128,9 @@ class Profile(IntEnum):
 
     def params(self, server_side: bool) -> ModulationParams:
         if self == self.Slowest:
+            return ModulationParams(16000., 160., 12000.) if server_side \
+                else ModulationParams(14000., 140., 10000.)
+
             return ModulationParams(4000., 400., 1700.) if server_side \
                 else ModulationParams(2400., 240., 1200.)
         elif self == self.Slow:
@@ -152,9 +196,8 @@ class AudioIo(GoofyIo):
     _out_samprate: int
     _out_bufsize: int
 
-    # input and output quality profiles
-    _in_profile: Profile
-    _out_profile: Profile
+    # quality profile used to get the modulation parameters
+    _profile: Profile
 
     # input and output modulation parameters
     _in_mod: ModulationParams
@@ -190,9 +233,26 @@ class AudioIo(GoofyIo):
     _in_marker_clip: np.ndarray | None = None
     _in_marker_clip_fft: np.ndarray | None = None
 
+    # input symbol clip, used to detect "on" (1) symbols
+    _in_sym_clip_cos: np.ndarray | None = None
+    _in_sym_clip_sin: np.ndarray | None = None
+
     _in_buf: np.ndarray | None = None
     _in_state: InputState = InputState.WaitingForMarker
     _in_inverse_ir: np.ndarray | None = None
+    _in_bits: np.ndarray | None = None
+    _in_bytes: bytearray | None = None
+
+    _in_packet_idx: int = 0
+    _in_packet_checksum: int = 0
+    _in_packet_datalen: int = 0
+
+    _in_valid_packet_idx: int = 0
+
+    _in_real_data: bytearray
+    _in_real_data_lock: threading.Lock
+
+    _request_retransmission: bool = False
 
     def list_devices(
         device_type: AudioDeviceType = AudioDeviceType.InputOutput
@@ -240,8 +300,7 @@ class AudioIo(GoofyIo):
         input_device: AudioDevice,
         output_device: AudioDevice,
         server_side: bool,  # True if running as the server side
-        input_profile: Profile,  # quality profile of the other side
-        output_profile: Profile,  # transmission quality profile
+        profile: Profile,  # quality profile
         output_volume: float = .75
     ):
         self._log = make_logger(f"AudioIo")
@@ -252,9 +311,7 @@ class AudioIo(GoofyIo):
         self._out_samprate = 48000
         self._out_bufsize = 4096
 
-        self.set_input_profile(input_profile)
-        self.set_output_profile(output_profile)
-
+        self.set_profile(profile)
         self._out_volume = output_volume
 
         self._in_time = Float(0.)
@@ -263,6 +320,9 @@ class AudioIo(GoofyIo):
         self._out_packets_lock = threading.Lock()
 
         self._in_buf = np.zeros(0, dtype=Float)
+
+        self._in_real_data = bytearray()
+        self._in_real_data_lock = threading.Lock()
 
         self._log.debug(
             f"[input]\n"
@@ -325,29 +385,44 @@ class AudioIo(GoofyIo):
     def stop(self):
         self._running = False
 
-    def set_input_profile(self, profile: Profile):
-        self._in_profile = profile
-        self._in_mod = self._in_profile.params(not self._server_side)
+    def set_profile(self, profile: Profile):
+        self._profile = profile
 
+        self._in_mod = self._profile.params(not self._server_side)
+        self._out_mod = self._profile.params(self._server_side)
+
+        # cache some stuff that's used frequently in the input callback
         self._in_cor_hanning_smooth_kernel = hanning_smooth_kernel(int(
             .25 * MARKER_PERIODS / self._in_mod.marker
             * self._in_samprate * IOVERSAMPLE
         ))
-
         self._compute_input_marker_clip()
-
-    def set_output_profile(self, profile: Profile):
-        self._out_profile = profile
-        self._out_mod = self._out_profile.params(self._server_side)
+        self._compute_input_symbol_clip()
 
     def _receive(self, size: int) -> bytes:
-        raise NotImplementedError()
+        POLL_INTERVAL = .05
+        while True:
+            if not self._in_real_data_lock.acquire():
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            if len(self._in_real_data) < size:
+                self._in_real_data_lock.release()
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            data = bytes(self._in_real_data[:size])
+            self._in_real_data = self._in_real_data[size:]
+
+            self._in_real_data_lock.release()
+            return data
 
     def _send(self, data: bytes):
         force_acquire(self._out_packets_lock)
 
         self._out_packets.append(Packet(
-            len(self._out_packets) + self._out_packets_idx_offs,
+            (len(self._out_packets) + self._out_packets_idx_offs)
+            % (PACKET_IDX_MAX + 1),
             data
         ))
 
@@ -399,7 +474,7 @@ class AudioIo(GoofyIo):
 
             # skip if the absolute norm of the input buffer (divided by its
             # duration) is too low.
-            if in_norm / (len(self._in_buf) / real_samprate) < 5.:
+            if in_norm / (len(self._in_buf) / real_samprate) < 6.:
                 self._in_buf_pop(len(self._in_marker_clip))
                 return (None, pyaudio.paContinue)
 
@@ -408,7 +483,7 @@ class AudioIo(GoofyIo):
                 signal.correlate(
                     self._in_buf,
                     self._in_marker_clip,
-                    'same'
+                    "same"
                 ) / (in_norm * marker_norm)
             )
 
@@ -416,7 +491,7 @@ class AudioIo(GoofyIo):
             cor_smoothed = signal.convolve(
                 cor,
                 self._in_cor_hanning_smooth_kernel,
-                'same'
+                "same"
             )
 
             # find the average correlation value in places where it's lower than
@@ -430,7 +505,7 @@ class AudioIo(GoofyIo):
                 cor_min = np.min(cor_mean)
 
             # find rising and falling intervals
-            high_cor = cor_smoothed > cor_min * 8.
+            high_cor = cor_smoothed > cor_min * 15.
             edges = np.diff(high_cor.astype(np.int8))
             rising = np.where(edges == 1)[0] + 1
             falling = np.where(edges == -1)[0] + 1
@@ -489,9 +564,9 @@ class AudioIo(GoofyIo):
             # frequency response) of the channel (e.g. room reverb) and its
             # inverse and use it to eliminate echoes and reverb tails when
             # reading symbols.
-            self._in_inverse_ir = fft.ifft(
+            self._in_inverse_ir = np.astype(np.real(fft.ifft(
                 self._in_marker_clip_fft / fft.fft(received_marker)
-            )
+            )), Float)
 
             # calculate the ending time of the detected marker
             rise_t = interval[0] / real_samprate
@@ -502,28 +577,164 @@ class AudioIo(GoofyIo):
             # pop the input buffer until the marker end
             self._in_buf_pop(int(marker_end_t * real_samprate))
 
-            # reset _in_time
+            # reset _in_time, _in_bits, and _in_bytes.
             self._in_time = Float(0.)
-
-            # the data always has a constant 0 bit at the start so the real
-            # start time is one symbol after the marker.
-            self._in_data_start_time = 1. / self._in_mod.symrate
+            self._in_bits = np.ndarray(0, np.uint8)
+            self._in_bytes = bytearray()
 
             return (None, pyaudio.paContinue)
-        elif self._in_state == InputState.ReadingHeader:
-            # time since the end of the marker
-            t = np.arange(len(self._in_buf), dtype=Float) / real_samprate \
-                + (self._in_time - self._in_data_start_time)
+        elif self._in_state in [
+            InputState.ReadingHeader,
+            InputState.ReadingPayload
+        ]:
+            # continue until we have (N_GUARD_SYMBOLS + 2) symbols in the buffer
+            buf_duration = len(self._in_buf) / real_samprate
+            if buf_duration < (N_GUARD_SYMBOLS + 2) / self._in_mod.symrate:
+                return (None, pyaudio.paContinue)
 
-            # apply _in_inverse_channel_ir convolution
-            # TAA()
+            # convolve with the inverse impulse response of the channel to
+            # remove room reverb.
+            in_conv = signal.convolve(
+                self._in_buf,
+                self._in_inverse_ir,
+                "same"
+            )
 
-            # chop up into symbol-duration-long clips and correlate each one
-            # with the carrier frequency.
-            # TAA()
+            # see how many symbols (bits) we can read from the input buffer
+            if self._in_state == InputState.ReadingHeader:
+                n_bits_left = PACKET_HEADER_BYTES * 8 - len(self._in_bits)
+            elif self._in_state == InputState.ReadingPayload:
+                n_bits_left = self._in_packet_datalen * 8 - len(self._in_bits)
+            n_syms = min(
+                int(buf_duration * self._in_mod.symrate) - N_GUARD_SYMBOLS - 1,
+                n_bits_left
+            )
 
-            return (None, pyaudio.paContinue)
-        elif self._in_state == InputState.ReadingPayload:
+            # read symbols
+            n_samples_read = 0
+            for i in range(n_syms):
+                # calculate the current symbol's start and end times and indices
+                sym_idx = N_GUARD_SYMBOLS + i
+                sym_start_idx = int(
+                    sym_idx / self._in_mod.symrate * real_samprate
+                )
+                sym_end_idx = sym_start_idx + int(
+                    real_samprate / self._in_mod.symrate
+                )
+
+                # isolate the symbol from the input buffer
+                sym_clip = np.copy(in_conv[sym_start_idx:sym_end_idx])
+                sym_clip /= np.linalg.norm(sym_clip)
+
+                # dot-product with the ideal "on" (1) symbol to see how much of
+                # the carrier frequency is present.
+                carrier_strength = np.sqrt(
+                    np.dot(sym_clip, self._in_sym_clip_cos) ** 2.
+                    + np.dot(sym_clip, self._in_sym_clip_sin) ** 2.
+                )
+                print(f"{i} {carrier_strength=}")
+
+                # add to the bits
+                bit_value = np.uint8(carrier_strength > 60.)
+                self._in_bits = np.pad(
+                    self._in_bits,
+                    (0, 1),
+                    constant_values=[bit_value]
+                )
+
+                n_samples_read += (sym_end_idx - sym_start_idx)
+
+            # pop n_samples_read samples from the input buffer
+            self._in_buf_pop(n_samples_read)
+
+            # when we're done reading a packet, we pop this many samples from
+            # the beginning of the input buffer.
+            n_guard_samples = int(
+                real_samprate * N_GUARD_SYMBOLS / self._in_mod.symrate
+            )
+
+            # pack every 8 bits into a byte
+            while len(self._in_bits) >= 8:
+                self._in_bytes.append(
+                    np.packbits(self._in_bits[:8])[0]
+                )
+                self._in_bits = self._in_bits[8:]
+
+            if self._in_state == InputState.ReadingHeader \
+                    and len(self._in_bytes) >= PACKET_HEADER_BYTES:
+                header = bytes(self._in_bytes)[:PACKET_HEADER_BYTES]
+                self._in_bytes = self._in_bytes[PACKET_HEADER_BYTES:]
+
+                header_checksum = int.from_bytes(header[:2])
+                if header_checksum != compute_checksum(header[2:]):
+                    # couldn't verify header checksum. either the header has
+                    # errors or we detected a false marker.
+                    self._log.debug(
+                        "header checksum could not be verified, ignoring."
+                    )
+                    self._in_state = InputState.WaitingForMarker
+                    self._in_buf_pop(n_guard_samples)
+                    return (None, pyaudio.paContinue)
+
+                self._in_packet_idx = int.from_bytes(header[2:4])
+                self._in_packet_checksum = int.from_bytes(header[4:6])
+                self._in_packet_datalen = int.from_bytes(header[6:8])
+
+                if self._in_packet_idx == RETRANSMIT_REQ_PACKET_IDX:
+                    # this is a retransmission request, the "checksum" value
+                    # tells us the index from which we should start
+                    # retransmitting.
+                    force_acquire(self._out_packets_lock)
+                    self._out_packet_idx = min(
+                        self._out_packet_idx,
+                        self._in_packet_checksum
+                    )
+                    self._out_packets_lock.release()
+
+                    self._in_state = InputState.WaitingForMarker
+                    self._in_buf_pop(n_guard_samples)
+                elif self._in_packet_idx > PACKET_IDX_MAX:
+                    self._log.debug(
+                        f"received header with invalid packet index "
+                        f"{self._in_packet_idx}, ignoring."
+                    )
+                    self._in_state = InputState.WaitingForMarker
+                    self._in_buf_pop(n_guard_samples)
+                else:
+                    self._in_state = InputState.ReadingPayload
+
+            if self._in_state == InputState.ReadingPayload \
+                    and len(self._in_bytes) >= self._in_packet_datalen:
+                # done reading the packet data
+
+                data = bytes(self._in_bytes)[:self._in_packet_datalen]
+                self._in_bytes = self._in_bytes[self._in_packet_datalen:]
+
+                self._in_state = InputState.WaitingForMarker
+                self._in_buf_pop(n_guard_samples)
+
+                checksum_verified = True
+                if self._in_packet_datalen > 0:
+                    checksum_verified = \
+                        self._in_packet_checksum == compute_checksum(data)
+
+                if self._in_packet_idx < self._in_valid_packet_idx:
+                    # we've already received this packet index, ignore
+                    pass
+                elif self._in_packet_idx > self._in_valid_packet_idx:
+                    # we've missed at least one packet since the last valid one,
+                    # so we'll need to ask for retransmission in the output.
+                    self._request_retransmission = True
+                elif not checksum_verified:
+                    # data checksum couldn't be verified so there must be errors
+                    # in the data.
+                    self._request_retransmission = True
+                else:
+                    force_acquire(self._in_real_data_lock)
+                    self._in_valid_packet_idx += 1
+                    self._in_real_data += data
+                    self._in_real_data_lock.release()
+
             return (None, pyaudio.paContinue)
         raise ValueError("invalid enum value")
 
@@ -537,14 +748,22 @@ class AudioIo(GoofyIo):
         if not self._running:
             return (None, pyaudio.paAbort)
 
-        if self._out_curr_packet is None:
+        # if we don't have any bits left to transmit
+        if self._out_curr_packet_bits is None and self._request_retransmission:
+            # send a special header to request retransmission
+            self._request_retransmission = False
+            self._out_curr_packet_bits = self._out_unpack_bits_with_guards(
+                make_retransmission_request_header(self._in_valid_packet_idx)
+            )
+        elif self._out_curr_packet_bits is None:
             force_acquire(self._out_packets_lock)
 
-            # output silence until there's a new packet to transmit
             self._out_packet_idx = max(
                 self._out_packet_idx,
                 self._out_packets_idx_offs
             )
+
+            # output silence until there's a new packet to transmit
             if self._out_packet_idx - self._out_packets_idx_offs \
                     >= len(self._out_packets):
                 self._out_packets_lock.release()
@@ -554,14 +773,9 @@ class AudioIo(GoofyIo):
             self._out_curr_packet = self._out_packets[
                 self._out_packet_idx - self._out_packets_idx_offs
             ]
-            self._out_curr_packet_bits = np.pad(
-                np.unpackbits(np.frombuffer(
-                    self._out_curr_packet.to_bytes(),
-                    dtype=np.uint8
-                )),
-                (1,),
-                'constant',
-                constant_values=(0,)
+            self._out_packet_idx += 1
+            self._out_curr_packet_bits = self._out_unpack_bits_with_guards(
+                self._out_curr_packet.to_bytes()
             )
             self._out_time = Float(0.)
 
@@ -578,9 +792,10 @@ class AudioIo(GoofyIo):
         marker_duration = MARKER_PERIODS * 3. / self._out_mod.marker
         marker_mask = \
             (t - marker_duration * .5) < (MARKER_PERIODS / self._out_mod.marker)
-        samples = \
-            np.sin(2. * np.pi * self._out_mod.marker * t) * marker_mask \
+        samples = (
+            np.sin(2. * np.pi * self._out_mod.marker * t) * marker_mask
             + np.sin(2. * np.pi * self._out_mod.carrier * t) * marker_mask
+        ) * .5
 
         # bit index for each sample
         bit_indices = np.clip(
@@ -613,11 +828,10 @@ class AudioIo(GoofyIo):
         if bit_indices[-1] >= len(self._out_curr_packet_bits) - 1:
             force_acquire(self._out_packets_lock)
 
-            self._out_curr_packet.transmitted = True
-            self._out_curr_packet = None
+            if self._out_curr_packet is not None:
+                self._out_curr_packet.transmitted = True
+                self._out_curr_packet = None
             self._out_curr_packet_bits = None
-
-            self._out_packet_idx += 1
 
             self._out_packets_lock.release()
 
@@ -633,21 +847,52 @@ class AudioIo(GoofyIo):
         duration = MARKER_PERIODS * 3. / self._in_mod.marker
 
         t = np.arange(
-            int(duration * self._in_samprate * IOVERSAMPLE)
+            int(duration * self._in_samprate * IOVERSAMPLE),
+            dtype=Float
         ) / self._in_samprate / IOVERSAMPLE
 
         mask = (t - duration * .5) < (MARKER_PERIODS / self._in_mod.marker * .5)
         self._in_marker_clip = (
             np.sin(2. * np.pi * self._in_mod.marker * t)
             + np.sin(2. * np.pi * self._in_mod.carrier * t)
-        ) * mask
+        ) * .5 * mask
 
         self._in_marker_clip_fft = fft.fft(self._in_marker_clip)
 
+    def _compute_input_symbol_clip(self):
+        duration = 1. / self._in_mod.symrate
+
+        t = np.arange(
+            int(duration * self._in_samprate * IOVERSAMPLE),
+            dtype=Float
+        ) / self._in_samprate / IOVERSAMPLE
+
+        a = 2. * np.pi * self._in_mod.carrier * t
+        self._in_sym_clip_cos = np.cos(a)
+        self._in_sym_clip_sin = np.sin(a)
+
+        self._in_sym_clip_cos /= np.linalg.norm(self._in_sym_clip_cos)
+        self._in_sym_clip_sin /= np.linalg.norm(self._in_sym_clip_sin)
+
     def _in_buf_pop(self, n_samples: int):
-        actual_n = min(n_samples, len(self._in_buf))
+        actual_n = min(int(n_samples), len(self._in_buf))
         self._in_time += actual_n / self._in_samprate / IOVERSAMPLE
         self._in_buf = self._in_buf[actual_n:]
+
+    def _out_unpack_bits_with_guards(self, data: bytes):
+        """
+        unpack bits and add guard symbols (zero bits) at the beginning. read the
+        comment above N_GUARD_SYMBOLS to learn more.
+        """
+        return np.pad(
+            np.unpackbits(np.frombuffer(
+                data,
+                dtype=np.uint8
+            )),
+            (N_GUARD_SYMBOLS, 0),
+            "constant",
+            constant_values=(0,)
+        )
 
 
 _paudio_instance: pyaudio.PyAudio | None = None
@@ -721,7 +966,7 @@ def oversample(samples: np.ndarray, factor: int) -> np.ndarray:
         samples,
         factor,
         1,
-        window=('kaiser', 14)
+        window=("kaiser", 14)
     )
 
 
@@ -730,15 +975,19 @@ def downsample(samples: np.ndarray, factor: int) -> np.ndarray:
         samples,
         1,
         factor,
-        window=('kaiser', 14)
+        window=("kaiser", 14)
     )
 
 
 def hanning_smooth(a: np.ndarray, n: int) -> np.ndarray:
     h = np.hanning(n)
-    return np.convolve(a, h / np.sum(h), 'same')
+    return np.convolve(a, h / np.sum(h), "same")
 
 
 def hanning_smooth_kernel(n: int) -> np.ndarray:
     h = np.hanning(n)
     return h / np.sum(h)
+
+
+def compute_checksum(data: bytes) -> int:
+    return zlib.crc32(data) % 2**16

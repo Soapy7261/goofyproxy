@@ -60,30 +60,19 @@ def run(args: argparse.Namespace):
     gio = AudioIo(
         input_devices[args.input_device],
         output_devices[args.output_device],
-        True,
+        args.mode == "server",
         Profile.Slowest,
-        Profile.Slowest,
-        .2
+        .5
     )
 
-    threading.Thread(target=sendcin, args=(gio,)).start()
-
-    print("spinnin'")
-    if True:
-        import matplotlib.pyplot as plt
-
-        while gio._in_inverse_ir is None:
-            time.sleep(.1)
-
-        fig, axes = plt.subplots(2, 1, figsize=(8, 10))
-        axes[-1].set_xlabel('t')
-
-        axes[0].plot(gio._in_inverse_ir)
-        axes[0].set_title('Inverse IR')
-        axes[0].set_ylabel('y')
-
-        plt.tight_layout()
-        plt.show()
+    threading.Thread(target=sendcin, args=(gio,), daemon=True).start()
+    while True:
+        try:
+            s = gio.receive(1).decode()
+            print(s, end="")
+        except Exception as e:
+            print(format_exception(e))
+    return
 
     if args.mode == "server":
         GoofyServer(gio)
