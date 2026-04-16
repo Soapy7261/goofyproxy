@@ -32,14 +32,6 @@ OUT_PACKETS_MIN_COUNT = 16
 # NOTE: both sides must use the same value.
 MARKER_PERIODS = 200
 
-# once we have (N_GUARD_SYMBOLS + 1) symbols in the input buffer, we read the
-# last one after convolving with the inverse IR of the room (for reverb
-# cancelation). that means the first N_GUARD_SYMBOLS bits are always ignored,
-# so we account for this in the output and always transmit N_GUARD_SYMBOLS zero
-# bits before real data.
-# NOTE: both sides must use the same value.
-N_GUARD_SYMBOLS = 8
-
 # numeric data type for audio samples
 Float = np.float32
 
@@ -131,20 +123,20 @@ class Profile(IntEnum):
             return ModulationParams(16000., 160., 12000.) if server_side \
                 else ModulationParams(14000., 140., 10000.)
 
-            return ModulationParams(4000., 400., 1700.) if server_side \
-                else ModulationParams(2400., 240., 1200.)
+            return ModulationParams(4000., 200., 2200.) if server_side \
+                else ModulationParams(3000., 150., 1200.)
         elif self == self.Slow:
-            return ModulationParams(8000., 1000., 3500.) if server_side \
-                else ModulationParams(5000., 625., 2800.)
+            return ModulationParams(8000., 400., 4500.) if server_side \
+                else ModulationParams(6000., 300., 3500.)
         elif self == self.Medium:
-            return ModulationParams(12000., 2000., 4500.) if server_side \
-                else ModulationParams(6000., 1000., 3800.)
+            return ModulationParams(12000., 1200., 3600.) if server_side \
+                else ModulationParams(6000., 600., 2600.)
         elif self == self.Fast:
-            return ModulationParams(18000., 3000., 6000.) if server_side \
-                else ModulationParams(9000., 1500., 4500.)
+            return ModulationParams(18000., 2250., 5000.) if server_side \
+                else ModulationParams(9000., 1125., 3500.)
         elif self == self.Fastest:
-            return ModulationParams(20000., 4000., 6500.) if server_side \
-                else ModulationParams(9000., 1800., 5000.)
+            return ModulationParams(20000., 4000., 5000.) if server_side \
+                else ModulationParams(9000., 1800., 3500.)
         raise ValueError("invalid enum value")
 
 
@@ -454,6 +446,10 @@ class AudioIo(GoofyIo):
         # just some constants for later
         real_samprate = self._in_samprate * IOVERSAMPLE
         marker_duration = len(self._in_marker_clip) / real_samprate
+        if marker_duration < 1. / self._in_mod.symrate:
+            raise ValueError(
+                f"marker duration is shorter than a symbol ({self._in_mod=})"
+            )
 
         # convert to numpy float array
         samples = np.frombuffer(in_data, dtype=np.int16).astype(Float) \
@@ -572,13 +568,15 @@ class AudioIo(GoofyIo):
             rise_t = interval[0] / real_samprate
             fall_t = interval[1] / real_samprate
             middle_t = .5 * (rise_t + fall_t)
-            marker_end_t = middle_t + (.5 * marker_duration)
+            marker_start_t = middle_t - (.5 * marker_duration)
 
-            # pop the input buffer until the marker end
-            self._in_buf_pop(int(marker_end_t * real_samprate))
+            # pop the input buffer until the marker start
+            self._in_buf_pop(int(marker_start_t * real_samprate))
 
             # reset _in_time, _in_bits, and _in_bytes.
-            self._in_time = Float(0.)
+            # NOTE: we set _in_time to negative marker_duration so real data
+            # starts at exactly 0.
+            self._in_time = Float(-marker_duration)
             self._in_bits = np.ndarray(0, np.uint8)
             self._in_bytes = bytearray()
 
@@ -587,26 +585,31 @@ class AudioIo(GoofyIo):
             InputState.ReadingHeader,
             InputState.ReadingPayload
         ]:
-            # continue until we have (N_GUARD_SYMBOLS + 2) symbols in the buffer
             buf_duration = len(self._in_buf) / real_samprate
-            if buf_duration < (N_GUARD_SYMBOLS + 2) / self._in_mod.symrate:
+
+            # make sure to keep at least a marker_duration in the buffer for
+            # effective room reverb cancelation.
+            buf_duration -= marker_duration
+
+            # continue until we have at least one symbol
+            if buf_duration < 1. / self._in_mod.symrate:
                 return (None, pyaudio.paContinue)
 
             # convolve with the inverse impulse response of the channel to
-            # remove room reverb.
+            # cancel room reverb.
             in_conv = signal.convolve(
                 self._in_buf,
                 self._in_inverse_ir,
                 "same"
             )
 
-            # see how many symbols (bits) we can read from the input buffer
+            # see how many symbols (bits) we can read
             if self._in_state == InputState.ReadingHeader:
                 n_bits_left = PACKET_HEADER_BYTES * 8 - len(self._in_bits)
             elif self._in_state == InputState.ReadingPayload:
                 n_bits_left = self._in_packet_datalen * 8 - len(self._in_bits)
             n_syms = min(
-                int(buf_duration * self._in_mod.symrate) - N_GUARD_SYMBOLS - 1,
+                int(buf_duration * self._in_mod.symrate),
                 n_bits_left
             )
 
@@ -614,9 +617,8 @@ class AudioIo(GoofyIo):
             n_samples_read = 0
             for i in range(n_syms):
                 # calculate the current symbol's start and end times and indices
-                sym_idx = N_GUARD_SYMBOLS + i
                 sym_start_idx = int(
-                    sym_idx / self._in_mod.symrate * real_samprate
+                    (i / self._in_mod.symrate + marker_duration) * real_samprate
                 )
                 sym_end_idx = sym_start_idx + int(
                     real_samprate / self._in_mod.symrate
@@ -647,11 +649,11 @@ class AudioIo(GoofyIo):
             # pop n_samples_read samples from the input buffer
             self._in_buf_pop(n_samples_read)
 
-            # when we're done reading a packet, we pop this many samples from
-            # the beginning of the input buffer.
-            n_guard_samples = int(
-                real_samprate * N_GUARD_SYMBOLS / self._in_mod.symrate
-            )
+            # after reading the last ever bit in the packet, we pop a
+            # marker duration's worth of samples from the beginning of the input
+            # buffer. if you've read everything above, you'll know why we do
+            # this (effective room reverb cancelation).
+            n_offset_samples = int(marker_duration * real_samprate)
 
             # pack every 8 bits into a byte
             while len(self._in_bits) >= 8:
@@ -673,7 +675,7 @@ class AudioIo(GoofyIo):
                         "header checksum could not be verified, ignoring."
                     )
                     self._in_state = InputState.WaitingForMarker
-                    self._in_buf_pop(n_guard_samples)
+                    self._in_buf_pop(n_offset_samples)
                     return (None, pyaudio.paContinue)
 
                 self._in_packet_idx = int.from_bytes(header[2:4])
@@ -692,14 +694,14 @@ class AudioIo(GoofyIo):
                     self._out_packets_lock.release()
 
                     self._in_state = InputState.WaitingForMarker
-                    self._in_buf_pop(n_guard_samples)
+                    self._in_buf_pop(n_offset_samples)
                 elif self._in_packet_idx > PACKET_IDX_MAX:
                     self._log.debug(
                         f"received header with invalid packet index "
                         f"{self._in_packet_idx}, ignoring."
                     )
                     self._in_state = InputState.WaitingForMarker
-                    self._in_buf_pop(n_guard_samples)
+                    self._in_buf_pop(n_offset_samples)
                 else:
                     self._in_state = InputState.ReadingPayload
 
@@ -711,7 +713,7 @@ class AudioIo(GoofyIo):
                 self._in_bytes = self._in_bytes[self._in_packet_datalen:]
 
                 self._in_state = InputState.WaitingForMarker
-                self._in_buf_pop(n_guard_samples)
+                self._in_buf_pop(n_offset_samples)
 
                 checksum_verified = True
                 if self._in_packet_datalen > 0:
@@ -752,7 +754,7 @@ class AudioIo(GoofyIo):
         if self._out_curr_packet_bits is None and self._request_retransmission:
             # send a special header to request retransmission
             self._request_retransmission = False
-            self._out_curr_packet_bits = self._out_unpack_bits_with_guards(
+            self._out_curr_packet_bits = unpack_bits(
                 make_retransmission_request_header(self._in_valid_packet_idx)
             )
         elif self._out_curr_packet_bits is None:
@@ -774,7 +776,7 @@ class AudioIo(GoofyIo):
                 self._out_packet_idx - self._out_packets_idx_offs
             ]
             self._out_packet_idx += 1
-            self._out_curr_packet_bits = self._out_unpack_bits_with_guards(
+            self._out_curr_packet_bits = unpack_bits(
                 self._out_curr_packet.to_bytes()
             )
             self._out_time = Float(0.)
@@ -798,10 +800,12 @@ class AudioIo(GoofyIo):
         ) * .5
 
         # bit index for each sample
+        bit_indices_unbounded = np.astype(
+            np.floor((t - marker_duration) * self._out_mod.symrate),
+            np.int32
+        )
         bit_indices = np.clip(
-            np.astype(np.floor(
-                (t - marker_duration) * self._out_mod.symrate
-            ), np.int32),
+            bit_indices_unbounded,
             0,
             len(self._out_curr_packet_bits) - 1
         )
@@ -812,7 +816,10 @@ class AudioIo(GoofyIo):
         # modulate the carrier
         samples += np.sin(
             2. * np.pi * self._out_mod.carrier * t
-        ) * bit_values
+        ) * bit_values * (
+            (bit_indices_unbounded >= 0)
+            & (bit_indices_unbounded < len(self._out_curr_packet_bits))
+        )
 
         # un-oversample
         samples = downsample(samples, OOVERSAMPLE)
@@ -875,24 +882,11 @@ class AudioIo(GoofyIo):
         self._in_sym_clip_sin /= np.linalg.norm(self._in_sym_clip_sin)
 
     def _in_buf_pop(self, n_samples: int):
+        if n_samples < 0:
+            return
         actual_n = min(int(n_samples), len(self._in_buf))
         self._in_time += actual_n / self._in_samprate / IOVERSAMPLE
         self._in_buf = self._in_buf[actual_n:]
-
-    def _out_unpack_bits_with_guards(self, data: bytes):
-        """
-        unpack bits and add guard symbols (zero bits) at the beginning. read the
-        comment above N_GUARD_SYMBOLS to learn more.
-        """
-        return np.pad(
-            np.unpackbits(np.frombuffer(
-                data,
-                dtype=np.uint8
-            )),
-            (N_GUARD_SYMBOLS, 0),
-            "constant",
-            constant_values=(0,)
-        )
 
 
 _paudio_instance: pyaudio.PyAudio | None = None
@@ -991,3 +985,7 @@ def hanning_smooth_kernel(n: int) -> np.ndarray:
 
 def compute_checksum(data: bytes) -> int:
     return zlib.crc32(data) % 2**16
+
+
+def unpack_bits(data: bytes):
+    return np.unpackbits(np.frombuffer(data, dtype=np.uint8))
