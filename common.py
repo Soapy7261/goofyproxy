@@ -14,10 +14,10 @@ from goofyio import *
 # goofy proxy version
 GOOFY_VERSION = 1
 
-# the goofy client can only work with servers with this version or higher.
+# the goofy client can only work with servers of this version or higher.
 GOOFY_MIN_SERVER_VERSION = 1
 
-# the goofy server can only work with clients with this version or higher.
+# the goofy server can only work with clients of this version or higher.
 GOOFY_MIN_CLIENT_VERSION = 1
 
 # logging settings
@@ -26,7 +26,7 @@ LOG_CONFIG = {
     "level": logging.INFO,
     # use terminal colors
     "colorize": True,
-    # logging: always include the thread ID, even when it has a name.
+    # always include the thread ID, even when it has a name.
     "always_include_thread_id": False,
     "file": None
 }
