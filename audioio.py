@@ -214,7 +214,7 @@ class AudioIo(GoofyIo):
     _out_time: Float
 
     _out_packets: list[Packet]
-    _out_packets_idx_offs: int = 0
+    _out_packet_idx_offs: int = 0
     _out_packet_idx: int = 0
     _out_packets_lock: threading.Lock
 
@@ -413,7 +413,7 @@ class AudioIo(GoofyIo):
         force_acquire(self._out_packets_lock)
 
         self._out_packets.append(Packet(
-            (len(self._out_packets) + self._out_packets_idx_offs)
+            (len(self._out_packets) + self._out_packet_idx_offs)
             % (PACKET_IDX_MAX + 1),
             data
         ))
@@ -427,7 +427,7 @@ class AudioIo(GoofyIo):
                 and self._out_packets[0].transmitted:
             total_size -= len(self._out_packets[0].data)
             self._out_packets.pop(0)
-            self._out_packets_idx_offs += 1
+            self._out_packet_idx_offs += 1
 
         self._out_packets_lock.release()
 
@@ -762,18 +762,18 @@ class AudioIo(GoofyIo):
 
             self._out_packet_idx = max(
                 self._out_packet_idx,
-                self._out_packets_idx_offs
+                self._out_packet_idx_offs
             )
 
             # output silence until there's a new packet to transmit
-            if self._out_packet_idx - self._out_packets_idx_offs \
+            if self._out_packet_idx - self._out_packet_idx_offs \
                     >= len(self._out_packets):
                 self._out_packets_lock.release()
                 return (np.zeros((frame_count,), np.int16), pyaudio.paContinue)
 
             # got a new packet to transmit
             self._out_curr_packet = self._out_packets[
-                self._out_packet_idx - self._out_packets_idx_offs
+                self._out_packet_idx - self._out_packet_idx_offs
             ]
             self._out_packet_idx += 1
             self._out_curr_packet_bits = unpack_bits(
@@ -987,5 +987,5 @@ def compute_checksum(data: bytes) -> int:
     return zlib.crc32(data) % 2**16
 
 
-def unpack_bits(data: bytes):
+def unpack_bits(data: bytes) -> np.ndarray:
     return np.unpackbits(np.frombuffer(data, dtype=np.uint8))
