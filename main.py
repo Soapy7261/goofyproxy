@@ -4,66 +4,29 @@ from typing import Self
 
 from goofy_client import GoofyClient
 from goofy_server import GoofyServer
-from audioio import AudioIo, AudioDeviceType, Profile, paudio_terminate
+from videoio import VideoIo
 from common import *
 
 
-def sendcin(gio: AudioIo):
+DEFAULT_FORMAT = "720x540-16-2@5"
+
+
+def sendcin(gio: VideoIo):
     while True:
         msg = input()
         gio.send(msg.encode())
 
 
 def run(args: argparse.Namespace):
-    if args.mode == "list_audio_devices":
-        input_devices = AudioIo.list_devices(AudioDeviceType.Input)
-        output_devices = AudioIo.list_devices(AudioDeviceType.Output)
-
-        s = "[input devices]\n"
-        for i in range(len(input_devices)):
-            device = input_devices[i]
-            s += f"{i}. "
-            s += device.name
-            if device.is_default_input:
-                s += " (default)"
-            s += "\n"
-        if not input_devices:
-            s += "empty\n"
-
-        s += "\n[output devices]\n"
-        for i in range(len(output_devices)):
-            device = output_devices[i]
-            s += f"{i}. "
-            s += device.name
-            if device.is_default_output:
-                s += " (default)"
-            s += "\n"
-        if not output_devices:
-            s += "empty\n"
-
-        print(s)
+    if args.mode == "list_monitors":
+        monitors = VideoIo.get_monitors()
+        for i in range(len(monitors)):
+            print(f"monitor {i}: {monitors[i]}")
+        if not monitors:
+            print("(no monitors found)")
         return
 
-    input_devices = AudioIo.list_devices(AudioDeviceType.Input)
-    output_devices = AudioIo.list_devices(AudioDeviceType.Output)
-    if not input_devices or not output_devices:
-        raise Exception(
-            f"need at least 1 input and 1 output audio device. found "
-            f"{len(input_devices)} input devices and {len(output_devices)} "
-            f"output devices."
-        )
-    if args.input_device < 0 or args.input_device >= len(input_devices):
-        raise Exception("invalid input audio device index")
-    if args.output_device < 0 or args.output_device >= len(output_devices):
-        raise Exception("invalid output audio device index")
-
-    gio = AudioIo(
-        input_devices[args.input_device],
-        output_devices[args.output_device],
-        args.mode == "server",
-        Profile.Slowest,
-        .5
-    )
+    gio = VideoIo(args.format, args.monitor)
 
     threading.Thread(target=sendcin, args=(gio,), daemon=True).start()
     while True:
@@ -130,28 +93,30 @@ def main():
 
     # command line parser
     parser = argparse.ArgumentParser(
-        description="goofy proxy using TxtFileIo"
+        description="goofy proxy using VideoIo: share your internet connection "
+        "with a friend through a video call"
     )
     parser.add_argument(
         "mode",
-        choices=["server", "client", "list_audio_devices"],
+        choices=["server", "client", "list_monitors"],
         help="which mode to run in"
     )
     parser.add_argument(
-        "-i",
-        "--input-device",
-        type=int,
-        default=0,
-        help="input audio device index (use list_audio_devices), will use the "
-        "default if not provided."
+        "-f",
+        "--format",
+        type=str,
+        default=DEFAULT_FORMAT,
+        help="output format represented as "
+        "\"{width}x{height}-{cell_size}-{bits_per_cell}@{rate}\" (default: "
+        f"{DEFAULT_FORMAT})"
     )
     parser.add_argument(
-        "-o",
-        "--output-device",
+        "-m",
+        "--monitor",
         type=int,
         default=0,
-        help="output audio device index (use list_audio_devices), will use the "
-        "default if not provided."
+        help="index of the monitor that's displaying the other side's video "
+        "feed (see list_monitors), starting from 0."
     )
     parser.add_argument(
         "-p",
@@ -167,7 +132,7 @@ def main():
         help="one of: debug, info, warning, error, fatal"
     )
     parser.add_argument(
-        "-f",
+        "-L",
         "--log-file",
         type=str,
         help="optional path to a log file, e.g. 'log.txt'"
@@ -201,8 +166,6 @@ def main():
         if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
             LOG_CONFIG["file"].flush()
             LOG_CONFIG["file"].close()
-
-        paudio_terminate()
 
 
 if __name__ == "__main__":
