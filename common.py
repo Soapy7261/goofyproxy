@@ -131,11 +131,13 @@ def decode_float32(b: bytes) -> float:
         )
     return float(struct.unpack('>f', b)[0])
 
+
 def _actually_close_socket(sock: socket.socket):
     try:
         sock.close()
     except:
         pass
+
 
 def close_socket(sock: socket.socket):
     """
