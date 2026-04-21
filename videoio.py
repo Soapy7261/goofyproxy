@@ -12,6 +12,7 @@ from enum import IntEnum
 from typing import NamedTuple
 
 import numpy as np
+from scipy.spatial.distance import cdist
 import zlib
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QLabel
@@ -22,6 +23,7 @@ import mss
 from mss.base import MSSBase
 from mss.models import Monitor
 
+from PIL import Image
 import qrcode
 import qrcode.constants
 from pyzbar import pyzbar
@@ -31,6 +33,7 @@ from common import *
 
 VIDEOIO_VERSION = 1
 VIDEOIO_MIN_PEER_VERSION = 1
+assert VIDEOIO_MIN_PEER_VERSION <= VIDEOIO_VERSION
 
 # remove older outgoing packets that are already transmitted until we go below
 # the memory limit or reach the minimum outgoing packet count, because we need
@@ -40,16 +43,15 @@ OUT_PACKETS_MIN_COUNT = 16  # must be bigger than 1
 
 
 """
-packet header (12 bytes):
+packet header (16 bytes):
 [2 bytes] header checksum
-[2 bytes] retransmission request packet index (FFFF if none)
-[2 bytes] packet index
+[4 bytes] retransmission request packet index (FFFFFFFF if none)
+[4 bytes] packet index
 [2 bytes] packet data checksum
 [4 bytes] packet data length in bytes
 """
 
-PACKET_HEADER_BYTES: int = 12
-PACKET_IDX_MAX = 64000
+PACKET_HEADER_BYTES: int = 16
 
 
 class Packet:
@@ -67,21 +69,16 @@ class Packet:
         self.idx = idx
         self.data = data
 
-        if self.idx > PACKET_IDX_MAX:
-            raise ValueError(
-                f"invalid packet index ({self.idx} > {PACKET_IDX_MAX})"
-            )
-
     def to_bytes(self, format: Format) -> bytes:
         if self.retransmission_req_idx is None \
                 or self.retransmission_req_idx < 0:
-            retran_req = 65535
+            retran_req = 2**32 - 1
         else:
             retran_req = int(self.retransmission_req_idx)
 
         header = \
-            retran_req.to_bytes(2) \
-            + self.idx.to_bytes(2) \
+            retran_req.to_bytes(4) \
+            + self.idx.to_bytes(4) \
             + compute_checksum(self.data).to_bytes(2) \
             + len(self.data).to_bytes(4)
 
@@ -112,13 +109,11 @@ class Format:
 
       height (int): total height
 
-      cell_width (int): width of individual cells
-
-      cell_height (int): height of individual cells
+      cell_size (int): width and height of individual cells
 
       bits_per_cell (int): how many bits to encode in each cell. the total
-        number of possible colors will be 2 to the power of this number (e.g. 16
-        possible colors for 4 bits).
+          number of possible colors will be 2 to the power of this number (e.g.
+          16 possible colors for 4 bits).
 
       rate (float): how many times per second to update the colors
     """
@@ -223,6 +218,14 @@ class Format:
             raise TypeError("invalid format")
 
 
+class Aabb(NamedTuple):
+    """
+    2D axis-aligned bounding box
+    """
+    top_left: tuple[float, float]
+    bottom_right: tuple[float, float]
+
+
 COLOR_PALETTES = {
     # 1 bit: black and white
     1: np.asarray([[0, 0, 0], [255, 255, 255]], dtype=np.uint8),
@@ -262,7 +265,48 @@ class VideoIo(GoofyIo):
     """
     a `GoofyIo` that transfers data through video calls. data is sent by showing
     a grid of colorful squares to the other side and received by capturing the
-    other side's video feed.
+    other side's video feed. QR code is used for the handshake process at the
+    beginning.
+
+    once a `VideoIo` is created, an empty window will appear. the user has time
+    to move it around if needed, then you must call `start()` to start the
+    handshake process. the window must not be moved around on the screen after
+    that point.
+
+    Args:
+
+        out_format (str | Format):
+            output grid format represented as
+            `{width}x{height}-{cell_size}-{bits_per_cell}@{rate}`.
+            example: `720x480-16-2@5`
+
+        in_monitor_idx (int = 0):
+            index of the monitor on which the peer's video feed is visible. you
+            can use static function `get_monitors()` to get the list of
+            available monitors.
+
+        sender_id (str | None = None):
+            sender ID to use for the handshake process. if `None`, one will be
+            generated.
+
+        peer_id (str | None = None):
+            sender ID of the peer we're looking for in the handshake process.
+            if `None`, the first detected peer will be chosen.
+
+        screenshot_speed (float = 2.):
+            the receive thread will take a screenshot and read the peer's video
+            feed this many times for every "frame" (1 / peer_format.rate). it
+            may be helpful to use a higher value for this in certain cases where
+            the frame rate of the peer's format is low (e.g. rate <= 2) while
+            the cells are small and detailed, because video compression usually
+            improves the image quality if the image stays still for some time
+            (so by taking more screenshots we effectively wait for the image
+            quality to improve so we can read the data without corruption).
+
+        corrupt_packet_threshold (int = 4):
+            if we get more than this many corrupt packets (e.g. index too far
+            ahead or checksum unverified), we'll ask the other side to start
+            retransmitting from the last packet index we properly received.
     """
 
     _log: logging.Logger
@@ -284,18 +328,16 @@ class VideoIo(GoofyIo):
 
     _out_pixels: np.ndarray
 
-    _in_packet_idx: int = 0
-    _in_packet_checksum: int = 0
-    _in_packet_datalen: int = 0
-
     _in_valid_packet_idx: int = 0
-
     _in_buf: bytearray
     _in_buf_lock: threading.Lock
 
+    _n_corrupt_receives: int = False
     _request_retransmission: bool = False
 
-    _running: bool = True
+    _started: bool = False
+    _stopping: bool = False
+
     _send_thread: threading.Thread
     _receive_thread: threading.Thread
 
@@ -312,14 +354,21 @@ class VideoIo(GoofyIo):
 
     _peer_sender_id: str | None = None
     _peer_format: Format | None = None
+    _peer_aabb: Aabb | None = None
 
     _ignored_peers: list[str]
+
+    _screenshot_speed: float
+    _corrupt_packet_threshold: int
 
     def __init__(
         self,
         out_format: str | Format,
         in_monitor_idx: int = 0,
-        peer_id: str | None = None
+        sender_id: str | None = None,
+        peer_id: str | None = None,
+        screenshot_speed: float = 2.,
+        corrupt_packet_threshold: int = 4
     ):
         self._log = make_logger(f"VideoIo")
 
@@ -329,6 +378,9 @@ class VideoIo(GoofyIo):
 
         self._out_palette = COLOR_PALETTES[self.out_format.bits_per_cell]
         self._ignored_peers = []
+
+        self._screenshot_speed = screenshot_speed
+        self._corrupt_packet_threshold = corrupt_packet_threshold
 
         self._log.debug(
             f"output format: {self.out_format} "
@@ -348,14 +400,24 @@ class VideoIo(GoofyIo):
         self._in_buf_lock = threading.Lock()
 
         try:
-            self._sender_id = getpass.getuser().strip().replace(" ", "-") \
-                .replace("#", "-")
+            if isinstance(sender_id, str):
+                self._sender_id = sender_id
+            else:
+                self._sender_id = \
+                    getpass.getuser().strip() + f"-{random.randint(0, 999)}"
+            self._sender_id = \
+                self._sender_id.strip().replace(" ", "-").replace("#", "-")
         except OSError:
             pass
         if not self._sender_id:
-            self._sender_id = "unknown"
-        self._sender_id += f"-{random.randint(0, 999)}"
-        self._log.info(f"using sender ID {self._sender_id}")
+            self._sender_id = f"unknown-{random.randint(0, 999)}"
+        self._log.info(f"using sender ID \"{self._sender_id}\"")
+
+        if isinstance(self._peer_sender_id, str):
+            if self._peer_sender_id == sender_id:
+                raise ValueError("peer ID is the same as our own sender ID")
+        elif self._peer_sender_id is not None:
+            raise TypeError("peer_id is neither a str or None")
 
         self._send_thread = threading.Thread(
             name="VideoIo send thread",
@@ -373,11 +435,16 @@ class VideoIo(GoofyIo):
         )
         self._receive_thread.start()
 
+    def start(self):
+        if self._stopping:
+            raise RuntimeError("can't continue running after stopping")
+        self._started = True
+
     def running(self) -> bool:
-        return self._running
+        return self._started and not self._stopping
 
     def stop(self):
-        self._running = False
+        self._stopping = True
 
     def get_monitors() -> list[Monitor]:
         sct = mss.mss()
@@ -386,7 +453,7 @@ class VideoIo(GoofyIo):
         return mons
 
     def _receive(self, size: int) -> bytes:
-        if not self._running:
+        if not self.running():
             raise ConnectionError("not running")
 
         while True:
@@ -411,7 +478,7 @@ class VideoIo(GoofyIo):
             return data
 
     def _send(self, data: bytes):
-        if not self._running:
+        if not self.running():
             raise ConnectionError("not running")
 
         force_acquire(self._out_buf_lock)
@@ -428,9 +495,11 @@ class VideoIo(GoofyIo):
                 self.out_format.width / self._window.devicePixelRatio(),
                 self.out_format.height / self._window.devicePixelRatio()
             )
+            self._window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
 
             self._label = QLabel()
             self._label.setScaledContents(False)
+            self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._window.setCentralWidget(self._label)
 
             self._timer = QTimer()
@@ -442,7 +511,7 @@ class VideoIo(GoofyIo):
         except BaseException as e:
             self._log.fatal(format_exception(e))
         finally:
-            self._running = False
+            self._stopping = True
             try:
                 self._timer.stop()
                 self._window.destroy()
@@ -451,10 +520,13 @@ class VideoIo(GoofyIo):
                 pass
 
     def _update_image(self):
-        if not self._running:
+        if self._stopping:
             self._timer.stop()
             self._window.destroy()
             self._app.quit()
+            return
+
+        if not self._started:
             return
 
         try:
@@ -465,7 +537,10 @@ class VideoIo(GoofyIo):
                     f"#{self.out_format}#hello"
                 ))
 
-                self._log.info("looking for a peer's QR code")
+                self._log.info(
+                    "looking for a peer" if self._peer_sender_id is None
+                    else f"looking for peer \"{self._peer_sender_id}\""
+                )
                 self._handshake_stage = HandshakeStage.LookingForPeerQr
                 return
 
@@ -509,8 +584,7 @@ class VideoIo(GoofyIo):
 
             self._out_packets.append(Packet(
                 retran_req_idx,
-                (len(self._out_packets) + self._out_packet_idx_offs)
-                % (PACKET_IDX_MAX + 1),
+                len(self._out_packets) + self._out_packet_idx_offs,
                 data
             ))
 
@@ -555,7 +629,7 @@ class VideoIo(GoofyIo):
             self._set_image(self._out_pixels, False, False)
         except BaseException as e:
             self._log.fatal(format_exception(e))
-            self._running = False
+            self._stopping = True
 
     def _set_image(
         self,
@@ -563,7 +637,7 @@ class VideoIo(GoofyIo):
         keep_aspect_ratio: bool = True,
         smooth: bool = True
     ):
-        if img.dtype in (np.float32, np.float64, np.float128):
+        if img.dtype in (np.float32, np.float64):
             img = np.round(np.clip(img, 0., 1.) * 255.)
         img = img.astype(np.uint8)
         h, w = img.shape[:2]
@@ -614,24 +688,27 @@ class VideoIo(GoofyIo):
                 )
             self._monitor = self._sct.monitors[self._in_monitor_idx + 1]
 
-            while self._running:
+            while not self._started and not self._stopping:
+                time.sleep(.02)
+
+            while not self._stopping:
                 start_time = time.time_ns()
 
                 self._read_screen()
 
                 elapsed = float(time.time_ns() - start_time) / 1e9
                 if self._peer_format:
-                    interval = .95 / self._peer_format.rate
+                    interval = \
+                        1. / self._peer_format.rate / self._screenshot_speed
                 else:
                     interval = .1
                 time.sleep(max(0., interval - elapsed))
         except BaseException as e:
             self._log.fatal(format_exception(e))
         finally:
-            self._running = False
+            self._stopping = True
 
     def _read_screen(self):
-        return
         if self._handshake_stage == HandshakeStage.LookingForPeerQr:
             qr_codes = find_qr_codes(self._take_screenshot())
             senders: list[tuple[Aabb, str, Format]] = []
@@ -644,10 +721,12 @@ class VideoIo(GoofyIo):
 
                 sender_version, sender_id, sender_format_str, cmd = parts[:4]
                 parts = parts[4:]
-                if not sender_version.startswith("VideoIo-"):
+
+                version_prefix = "VideoIo-"
+                if not sender_version.startswith(version_prefix):
                     continue
                 try:
-                    sender_version = int(sender_version)
+                    sender_version = int(sender_version[len(version_prefix):])
                 except Exception:
                     continue
                 if sender_version < VIDEOIO_MIN_PEER_VERSION:
@@ -672,7 +751,7 @@ class VideoIo(GoofyIo):
 
                 # skip if the sender's format is invalid
                 try:
-                    sender_format = Format(sender_format_str)
+                    sender_format = Format.create(sender_format_str)
                 except Exception:
                     continue
 
@@ -690,7 +769,7 @@ class VideoIo(GoofyIo):
                                 f"another peer with ID \"{sender_acked_who}\"."
                             )
                         continue
-                elif cmd != "hello":
+                elif cmd != "hello" or len(parts) > 1:
                     continue
 
                 senders.append((qr.aabb, sender_id, sender_format))
@@ -698,8 +777,39 @@ class VideoIo(GoofyIo):
             if not senders:
                 return
 
-            qr_aabb = self._peer_sender_id, self._peer_format = senders[0]
+            # found peer
+            qr_aabb, self._peer_sender_id, self._peer_format = senders[0]
+
+            qr_size = qr_aabb.bottom_right[1] - qr_aabb.top_left[1]
+            if self._peer_format.width > self._peer_format.height:
+                center_x = (qr_aabb.top_left[0] + qr_aabb.bottom_right[0]) * .5
+                ratio = self._peer_format.width / self._peer_format.height
+                self._peer_aabb = Aabb(
+                    top_left=(
+                        center_x - qr_size * ratio * .5,
+                        qr_aabb.top_left[1]
+                    ),
+                    bottom_right=(
+                        center_x + qr_size * ratio * .5,
+                        qr_aabb.bottom_right[1]
+                    )
+                )
+            else:
+                center_y = (qr_aabb.top_left[1] + qr_aabb.bottom_right[1]) * .5
+                ratio = self._peer_format.height / self._peer_format.width
+                self._peer_aabb = Aabb(
+                    top_left=(
+                        qr_aabb.top_left[0],
+                        center_y - qr_size * ratio * .5
+                    ),
+                    bottom_right=(
+                        qr_aabb.bottom_right[0],
+                        center_y + qr_size * ratio * .5
+                    )
+                )
+
             self._in_palette = COLOR_PALETTES[self._peer_format.bits_per_cell]
+            self._in_palette = self._in_palette.astype(np.float32) / 255.
 
             self._log.info(
                 f"found peer \"{self._peer_sender_id}\" with format "
@@ -710,13 +820,206 @@ class VideoIo(GoofyIo):
             )
             self._handshake_stage = HandshakeStage.ShowingAck
         elif self._handshake_stage == HandshakeStage.WaitingForAck:
-            return
+            qr_codes = find_qr_codes(self._take_screenshot())
+            found_ack = False
+            for qr in qr_codes:
+                parts = qr.text.split("#")
+                if len(parts) < 5:
+                    continue
+
+                _, sender_id, _, cmd, acked_who = parts[:5]
+                parts = parts[5:]
+
+                if sender_id != self._peer_sender_id:
+                    continue
+
+                if cmd != "ack":
+                    continue
+
+                if acked_who != self._sender_id:
+                    raise Exception(
+                        f"peer is acknowledging another peer with ID "
+                        f"\"{acked_who}\"."
+                    )
+
+                found_ack = True
+                break
+
+            if not found_ack:
+                return
+
+            self._log.info("VideoIo handshake was successful")
+            self._handshake_stage = HandshakeStage.Done
         elif self._handshake_stage != HandshakeStage.Done:
             return
+
+        # take a screenshot
+        img = self._take_screenshot()
+
+        # scale up the image to handle non-integer AABB's more precisely and
+        # then convert to float32.
+        SCALE = 2.
+        img = scale_image_u8(img, SCALE).astype(np.float32) / 255.
+
+        # scaled peer AABB
+        x0 = int(self._peer_aabb.top_left[0] * SCALE)
+        y0 = int(self._peer_aabb.top_left[1] * SCALE)
+        x1 = int(self._peer_aabb.bottom_right[0] * SCALE)
+        y1 = int(self._peer_aabb.bottom_right[1] * SCALE)
+        w = x1 - x0
+        h = y1 - y0
+
+        if x0 < 0. or y1 < 0. or x1 > img.shape[1] or y1 > img.shape[0]:
+            raise RuntimeError(
+                f"peer's video feed is not fully contained inside the monitor ("
+                f"{x0=}, {y0=}, {x1=}, {y1=}, {img.shape=}, {SCALE=})."
+            )
+
+        cell_x = np.arange(self._peer_format.res_x, dtype=np.float32)
+        cell_y = np.arange(self._peer_format.res_y, dtype=np.float32)
+
+        cell_x0 = (
+            x0 + w * (cell_x / self._peer_format.res_x)
+        ).astype(np.int32)
+        cell_x1 = (
+            x0 + w * ((cell_x + 1.) / self._peer_format.res_x)
+        ).astype(np.int32)
+        cell_y0 = (
+            y0 + h * (cell_y / self._peer_format.res_y)
+        ).astype(np.int32)
+        cell_y1 = (
+            y0 + h * ((cell_y + 1.) / self._peer_format.res_y)
+        ).astype(np.int32)
+
+        # create meshgrid of cell indices
+        x_indices, y_indices = np.meshgrid(
+            cell_x.astype(np.int32),
+            cell_y.astype(np.int32),
+            indexing='xy'
+        )
+
+        # flatten for easier processing
+        x0_flat = cell_x0[x_indices.ravel()]
+        x1_flat = cell_x1[x_indices.ravel()]
+        y0_flat = cell_y0[y_indices.ravel()]
+        y1_flat = cell_y1[y_indices.ravel()]
+
+        # extract the average color for every cell
+        colors = []
+        for i in range(len(x0_flat)):
+            cell_average_color = np.mean(
+                img[y0_flat[i]:y1_flat[i], x0_flat[i]:x1_flat[i]],
+                axis=(0, 1)
+            )
+            colors.append(cell_average_color)
+        colors = np.array(colors)
+
+        # for every color, find the index of the closest color in the palette
+        color_indices = np.argmin(
+            cdist(colors, self._in_palette),
+            axis=1
+        ).astype(np.uint32)
+
+        # unpack each value to "bits_per_cell" bits
+        bits = unpack_n_bits(color_indices, self._peer_format.bits_per_cell)
+
+        # remove any trailing zeros so the final size is a multiple of 8
+        bits = bits[:bits.size // 8 * 8]
+
+        # pack into bytes
+        data = bytes(np.packbits(bits).data)
+
+        if len(data) < PACKET_HEADER_BYTES:
+            raise Exception(
+                f"received packet data is too small ({len(data)} bytes) to "
+                f"contain a header. this should never happen. there must be a "
+                f"bug in the code."
+            )
+
+        header = data[:PACKET_HEADER_BYTES]
+        data = data[PACKET_HEADER_BYTES:]
+
+        header_checksum = int.from_bytes(header[:2])
+        header_actual_checksum = compute_checksum(header[2:])
+        if header_checksum != header_actual_checksum:
+            # header checksum couldn't be verified.
+
+            # if we haven't read any packets yet and the header checksum is
+            # incorrect, then the other side is probably still showing a QR code
+            # as part of the handshake process, so we won't count it as a
+            # corrupt receive.
+            if self._in_valid_packet_idx > 0:
+                self.n_corrupt_receives_incr()
+            return
+
+        retransmission_req_idx = int.from_bytes(header[2:6])
+        if retransmission_req_idx != 2**32 - 1:
+            # got a retransmission request
+            force_acquire(self._out_packets_lock)
+            self._out_packet_idx = max(0, min(
+                self._out_packet_idx,
+                retransmission_req_idx
+            ))
+            self._out_packets_lock.release()
+
+        packet_idx = int.from_bytes(header[6:10])
+        data_checksum = int.from_bytes(header[10:12])
+        data_len = int.from_bytes(header[12:16])
+        if len(data) < data_len:
+            raise Exception(
+                f"packet's data length ({len(data)} bytes) is smaller than the "
+                f"reported value in the header ({data_len} bytes)."
+            )
+        data = data[:data_len]
+
+        checksum_verified = True
+        if data_len > 0:
+            checksum_verified = (data_checksum == compute_checksum(data))
+
+        if packet_idx < self._in_valid_packet_idx:
+            # we've already received this packet index, ignore
+            return
+        elif packet_idx > self._in_valid_packet_idx:
+            # we've missed at least one packet since the last valid one
+            self.n_corrupt_receives_incr()
+            return
+        elif not checksum_verified:
+            # data checksum couldn't be verified so there must be errors in the
+            # data.
+            self.n_corrupt_receives_incr()
+            return
+
+        # finally! the header is correct, the index is correct, and the data is
+        # correct, so we can add it to the input buffer at last.
+        force_acquire(self._in_buf_lock)
+        self._in_valid_packet_idx += 1
+        self._in_buf += data
+        self._in_buf_lock.release()
+
+        self.n_corrupt_receives_decr()
 
     def _take_screenshot(self) -> np.ndarray:
         screenshot = self._sct.grab(self._monitor)
         return np.array(screenshot)[:, :, :3][:, :, ::-1]  # BGRA → RGB
+
+    def n_corrupt_receives_incr(self):
+        self._n_corrupt_receives += 1
+
+        n_corrupt_packets = int(
+            self._n_corrupt_receives / self._screenshot_speed
+        )
+        if n_corrupt_packets > self._corrupt_packet_threshold:
+            self._n_corrupt_receives = 0
+            self._request_retransmission = True
+            self._log.warning(
+                "too many corrupt packets, sending a retransmission request"
+            )
+
+    def n_corrupt_receives_decr(self):
+        self._n_corrupt_receives = max(
+            0,
+            self._n_corrupt_receives - 1
+        )
 
 
 def compute_checksum(data: bytes) -> int:
@@ -725,6 +1028,17 @@ def compute_checksum(data: bytes) -> int:
 
 def unpack_bits(data: bytes) -> np.ndarray:
     return np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+
+
+def unpack_n_bits(arr: np.ndarray, n: int) -> np.ndarray:
+    """
+    unpack an array of integers in the [0, 2^N-1] range to an array of bits with
+    N bits for each element in arr.
+    """
+    return (
+        (arr[:, None] >> ((n - 1) - np.arange(n)))
+        & 1
+    ).flatten().astype(np.uint8)
 
 
 def pack_bits(bits: np.ndarray, m: int) -> np.ndarray:
@@ -737,19 +1051,19 @@ def pack_bits(bits: np.ndarray, m: int) -> np.ndarray:
         bits = np.pad(bits, (0, m - bits.size % m), constant_values=[0])
     bits = bits.reshape(-1, m)
 
-    # sum with bit-place weights, e.g. [8, 4, 2, 1] for m=4.
+    # sum with bit-place weights, e.g. [8, 4, 2, 1] for M=4.
     weights = 1 << np.arange(m - 1, -1, -1, bits.dtype)
     return np.sum(bits * weights, axis=1, dtype=bits.dtype)
 
 
-QR_BORDER_FACTOR = .15
+QR_BORDER_FACTOR = .2
 
 
 def generate_qr(data: str | bytes) -> np.ndarray:
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
+        box_size=12,
         border=0,
     )
     qr.add_data(data)
@@ -772,14 +1086,6 @@ def generate_qr(data: str | bytes) -> np.ndarray:
     )
 
     return img
-
-
-class Aabb(NamedTuple):
-    """
-    2D axis-aligned bounding box
-    """
-    top_left: tuple[float, float]
-    bottom_right: tuple[float, float]
 
 
 class DetectedQr(NamedTuple):
@@ -825,3 +1131,15 @@ def find_qr_codes(img: np.ndarray) -> list[DetectedQr]:
         results.append(DetectedQr(aabb=aabb, text=text))
 
     return results
+
+
+def scale_image_u8(img: np.ndarray[np.uint8], scale: float):
+    img_pil = Image.fromarray(img)
+
+    h, w = img.shape[:2]
+    img_scaled = img_pil.resize(
+        (int(w * scale), int(h * scale)),
+        Image.Resampling.BILINEAR
+    )
+
+    return np.array(img_scaled)

@@ -8,12 +8,13 @@ from videoio import VideoIo
 from common import *
 
 
-DEFAULT_FORMAT = "720x540-16-2@5"
+DEFAULT_FORMAT = "720x540-16-2@4"
 
 
-def sendcin(gio: VideoIo):
-    while True:
-        msg = input()
+def chat_send(gio: VideoIo):
+    print("type something and hit [Enter] to send.")
+    while gio.running():
+        msg = f"~{input().replace("~", "-")}~"
         gio.send(msg.encode())
 
 
@@ -26,18 +27,43 @@ def run(args: argparse.Namespace):
             print("(no monitors found)")
         return
 
-    gio = VideoIo(args.format, args.monitor)
+    gio = VideoIo(
+        args.format,
+        args.monitor,
+        args.sender_id,
+        args.peer_id,
+        args.screenshot_speed,
+        args.corrupt_packet_threshold
+    )
 
-    threading.Thread(target=sendcin, args=(gio,), daemon=True).start()
-    while True:
+    if not args.start_immediately:
+        print("hit [Enter] to start the VideoIo handshake process...")
+        input()
+    gio.start()
+
+    if args.mode == "chat":
+        # sending
+        threading.Thread(target=chat_send, args=(gio,), daemon=True).start()
+
+        # receiving
+        buf: str = ""
         try:
-            s = gio.receive(1).decode()
-            print(s, end="")
+            while gio.running():
+                s = gio.receive(1).decode()
+                if s != "~":
+                    raise Exception("invalid message format")
+
+                buf = ""
+                while gio.running():
+                    buf += gio.receive(1).decode()
+                    if buf.endswith("~"):
+                        buf = buf[:-1]
+                        break
+
+                print(f"<<< {buf}")
         except Exception as e:
             print(format_exception(e))
-    return
-
-    if args.mode == "server":
+    elif args.mode == "server":
         GoofyServer(gio)
     elif args.mode == "client":
         if not args.port:
@@ -98,7 +124,7 @@ def main():
     )
     parser.add_argument(
         "mode",
-        choices=["server", "client", "list_monitors"],
+        choices=["server", "client", "chat", "list_monitors"],
         help="which mode to run in"
     )
     parser.add_argument(
@@ -106,7 +132,7 @@ def main():
         "--format",
         type=str,
         default=DEFAULT_FORMAT,
-        help="output format represented as "
+        help="output grid format represented as "
         "\"{width}x{height}-{cell_size}-{bits_per_cell}@{rate}\" (default: "
         f"{DEFAULT_FORMAT})"
     )
@@ -117,6 +143,51 @@ def main():
         default=0,
         help="index of the monitor that's displaying the other side's video "
         "feed (see list_monitors), starting from 0."
+    )
+    parser.add_argument(
+        "-S",
+        "--sender-id",
+        type=str,
+        help="VideoIo sender ID. if not provided, one will be generated."
+    )
+    parser.add_argument(
+        "-P",
+        "--peer-id",
+        type=str,
+        help="sender ID of the peer. if not provided, the first detected peer "
+        "will be chosen."
+    )
+    parser.add_argument(
+        "--start-immediately",
+        action="store_true",
+        help="start the VideoIo handshake process as soon as the window opens. "
+        "if not enabled, the program will wait for the user to hit [Enter] "
+        "before it starts updating the window."
+    )
+    default = 2.
+    parser.add_argument(
+        "--screenshot-speed",
+        type=float,
+        default=default,
+        help=f"[{default=}] the VideoIo receive thread will take a screenshot "
+        "and read the peer's video feed this many times for every \"frame\" "
+        "(1 / peer_format.rate). it may be helpful to use a higher value for "
+        "this in certain cases where the frame rate of the peer's format is "
+        "low (e.g. rate <= 2) while the cells are small and detailed, because "
+        "video compression usually improves the image quality if the image "
+        "stays still for some time (so by taking more screenshots we "
+        "effectively wait for the image quality to improve so we can read the "
+        "data without corruption)."
+    )
+    default = 4
+    parser.add_argument(
+        "--corrupt-packet-threshold",
+        type=int,
+        default=default,
+        help=f"[{default=}] if we get more than this many corrupt packets "
+        "(e.g. index too far ahead or checksum unverified), we'll ask the "
+        "other side to start retransmitting from the last packet index we "
+        "properly received."
     )
     parser.add_argument(
         "-p",
