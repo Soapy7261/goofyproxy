@@ -27,6 +27,7 @@ from PIL import Image
 import qrcode
 import qrcode.constants
 from pyzbar import pyzbar
+import cv2
 
 from goofyio import GoofyIo
 from common import *
@@ -40,6 +41,8 @@ assert VIDEOIO_MIN_PEER_VERSION <= VIDEOIO_VERSION
 # to keep the last few packets in case the other side asks for a retransmission.
 OUT_PACKETS_MEMORY_LIMIT = 512 * 1024 * 1024
 OUT_PACKETS_MIN_COUNT = 16  # must be bigger than 1
+
+QR_BORDER_FACTOR = .2
 
 
 """
@@ -326,6 +329,9 @@ class VideoIo(GoofyIo):
     _out_packet_idx: int = 0
     _out_packets_lock: threading.Lock
 
+    _last_retran_req_time: float = 0.
+    _last_retran_req_idx: int = -1
+
     _out_pixels: np.ndarray
 
     _in_valid_packet_idx: int = 0
@@ -579,6 +585,10 @@ class VideoIo(GoofyIo):
             if self._request_retransmission:
                 self._request_retransmission = False
                 retran_req_idx = self._in_valid_packet_idx
+                self._log.warning(
+                    f"too many corrupt packets, sending a retransmission "
+                    f"request with index {retran_req_idx}."
+                )
 
             force_acquire(self._out_packets_lock)
 
@@ -780,34 +790,47 @@ class VideoIo(GoofyIo):
             # found peer
             qr_aabb, self._peer_sender_id, self._peer_format = senders[0]
 
-            qr_size = qr_aabb.bottom_right[1] - qr_aabb.top_left[1]
+            # expand qr_aabb based on QR_BORDER_FACTOR
+            center_x = (qr_aabb.top_left[0] + qr_aabb.bottom_right[0]) * .5
+            center_y = (qr_aabb.top_left[1] + qr_aabb.bottom_right[1]) * .5
+            width = qr_aabb.bottom_right[0] - qr_aabb.top_left[0]
+            height = qr_aabb.bottom_right[1] - qr_aabb.top_left[1]
+            size = float(
+                np.sqrt(width * height) * (1. + QR_BORDER_FACTOR * 2.)
+            )
+            half_size = size * .5
+            qr_aabb = Aabb(
+                top_left=(center_x - half_size, center_y - half_size),
+                bottom_right=(center_x + half_size, center_y + half_size)
+            )
+
+            # compute the bounding box of the peer's video feed
             if self._peer_format.width > self._peer_format.height:
-                center_x = (qr_aabb.top_left[0] + qr_aabb.bottom_right[0]) * .5
                 ratio = self._peer_format.width / self._peer_format.height
                 self._peer_aabb = Aabb(
                     top_left=(
-                        center_x - qr_size * ratio * .5,
+                        center_x - size * ratio * .5,
                         qr_aabb.top_left[1]
                     ),
                     bottom_right=(
-                        center_x + qr_size * ratio * .5,
+                        center_x + size * ratio * .5,
                         qr_aabb.bottom_right[1]
                     )
                 )
             else:
-                center_y = (qr_aabb.top_left[1] + qr_aabb.bottom_right[1]) * .5
                 ratio = self._peer_format.height / self._peer_format.width
                 self._peer_aabb = Aabb(
                     top_left=(
                         qr_aabb.top_left[0],
-                        center_y - qr_size * ratio * .5
+                        center_y - size * ratio * .5
                     ),
                     bottom_right=(
                         qr_aabb.bottom_right[0],
-                        center_y + qr_size * ratio * .5
+                        center_y + size * ratio * .5
                     )
                 )
 
+            # peer's color palette
             self._in_palette = COLOR_PALETTES[self._peer_format.bits_per_cell]
             self._in_palette = self._in_palette.astype(np.float32) / 255.
 
@@ -949,17 +972,36 @@ class VideoIo(GoofyIo):
             # as part of the handshake process, so we won't count it as a
             # corrupt receive.
             if self._in_valid_packet_idx > 0:
+                self._log.debug(
+                    "corrupt receive: header checksum couldn't be verified"
+                )
                 self.n_corrupt_receives_incr()
             return
 
         retransmission_req_idx = int.from_bytes(header[2:6])
-        if retransmission_req_idx != 2**32 - 1:
-            # got a retransmission request
+        if retransmission_req_idx != 2**32 - 1 and (
+            self._last_retran_req_idx != retransmission_req_idx
+            or time.time() - self._last_retran_req_time > max(
+                4,
+                self._corrupt_packet_threshold
+            ) / self._peer_format.rate
+        ):
+            self._last_retran_req_idx = retransmission_req_idx
+            self._last_retran_req_time = time.time()
+
             force_acquire(self._out_packets_lock)
+
+            prev_packet_idx = self._out_packet_idx
             self._out_packet_idx = max(0, min(
                 self._out_packet_idx,
                 retransmission_req_idx
             ))
+
+            self._log.warning(
+                f"retransmitting from packet index {self._out_packet_idx} "
+                f"(was at {prev_packet_idx})."
+            )
+
             self._out_packets_lock.release()
 
         packet_idx = int.from_bytes(header[6:10])
@@ -981,11 +1023,18 @@ class VideoIo(GoofyIo):
             return
         elif packet_idx > self._in_valid_packet_idx:
             # we've missed at least one packet since the last valid one
+            self._log.debug(
+                f"corrupt receive: index too far ahead "
+                f"({packet_idx} > {self._in_valid_packet_idx})"
+            )
             self.n_corrupt_receives_incr()
             return
         elif not checksum_verified:
             # data checksum couldn't be verified so there must be errors in the
             # data.
+            self._log.debug(
+                "corrupt receive: data checksum couldn't be verified"
+            )
             self.n_corrupt_receives_incr()
             return
 
@@ -1011,9 +1060,6 @@ class VideoIo(GoofyIo):
         if n_corrupt_packets > self._corrupt_packet_threshold:
             self._n_corrupt_receives = 0
             self._request_retransmission = True
-            self._log.warning(
-                "too many corrupt packets, sending a retransmission request"
-            )
 
     def n_corrupt_receives_decr(self):
         self._n_corrupt_receives = max(
@@ -1056,10 +1102,10 @@ def pack_bits(bits: np.ndarray, m: int) -> np.ndarray:
     return np.sum(bits * weights, axis=1, dtype=bits.dtype)
 
 
-QR_BORDER_FACTOR = .2
-
-
-def generate_qr(data: str | bytes) -> np.ndarray:
+def generate_qr(
+    data: str | bytes,
+    border_factor: float = QR_BORDER_FACTOR
+) -> np.ndarray:
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
@@ -1078,7 +1124,7 @@ def generate_qr(data: str | bytes) -> np.ndarray:
     )
 
     size = img.shape[0]
-    padding = int(QR_BORDER_FACTOR * size)
+    padding = int(border_factor * size)
     img = np.pad(
         img,
         ((padding, padding), (padding, padding)),
@@ -1091,6 +1137,38 @@ def generate_qr(data: str | bytes) -> np.ndarray:
 class DetectedQr(NamedTuple):
     aabb: Aabb
     text: str
+
+
+def qr_refine_corners(
+    img_gray: np.ndarray,
+    corners: list[tuple[float, float]],
+    win_size: int = 5,
+    zero_zone: int = -1,
+    max_iter: int = 30,
+    eps: float = .001
+) -> list[tuple[float, float]]:
+    """
+    refine QR code corner points to subpixel accuracy. used in find_qr_codes().
+    """
+
+    # convert to the shape expected by cornerSubPix: (N, 1, 2)
+    corners_np = np.array(corners, dtype=np.float32).reshape(-1, 1, 2)
+
+    criteria = (
+        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+        max_iter,
+        eps
+    )
+    cv2.cornerSubPix(
+        img_gray,
+        corners_np,
+        (win_size, win_size),
+        (zero_zone, zero_zone),
+        criteria
+    )
+
+    refined = corners_np.reshape(-1, 2).tolist()
+    return [(float(x), float(y)) for x, y in refined]
 
 
 def find_qr_codes(img: np.ndarray) -> list[DetectedQr]:
@@ -1107,24 +1185,48 @@ def find_qr_codes(img: np.ndarray) -> list[DetectedQr]:
     if img is None or img.size == 0:
         return []
 
+    # convert to grayscale for corner refinement
+    if img.ndim == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    # detect QR codes
     decoded_objects = pyzbar.decode(img)
 
-    results = []
+    results: list[DetectedQr] = []
     for obj in decoded_objects:
-        left, top, width, height = obj.rect
+        if hasattr(obj, 'polygon') and obj.polygon is not None:
+            # obj.polygon is a list of 4 points (x, y)
+            approx_corners = [(float(p.x), float(p.y)) for p in obj.polygon]
+        else:
+            # fallback to rect if polygon is missing
+            left, top, width, height = obj.rect
+            approx_corners = [
+                (left, top),
+                (left + width, top),
+                (left + width, top + height),
+                (left, top + height)
+            ]
 
-        center_x = left + width * .5
-        center_y = top + height * .5
-        size = float(np.sqrt(width * height) * (1. + QR_BORDER_FACTOR * 2.))
-        half_size = size * .5
+        if len(approx_corners) != 4:
+            continue
 
+        # refine the corners
+        refined_corners = qr_refine_corners(img, approx_corners)
+
+        # pixel center is 0.5
+        refined_corners_centered = \
+            [(x + .5, y + .5) for x, y in refined_corners]
+
+        # compute the axis‑aligned bounding box from the four corners
+        xs = [p[0] for p in refined_corners_centered]
+        ys = [p[1] for p in refined_corners_centered]
         aabb = Aabb(
-            top_left=(center_x - half_size, center_y - half_size),
-            bottom_right=(center_x + half_size, center_y + half_size)
+            top_left=(min(xs), min(ys)),
+            bottom_right=(max(xs), max(ys))
         )
 
         try:
-            text = obj.data.decode('utf-8')
+            text = obj.data.decode("utf-8")
         except Exception:
             continue
 
