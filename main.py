@@ -8,7 +8,7 @@ from videoio import VideoIo
 from common import *
 
 
-DEFAULT_FORMAT = "720x540-16-2@4"
+DEFAULT_FORMAT = "640x480-24-2@4"
 
 
 def chat_send(gio: VideoIo):
