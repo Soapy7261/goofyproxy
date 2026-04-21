@@ -12,10 +12,13 @@ DEFAULT_FORMAT = "640x480-24-2@4"
 
 
 def chat_send(gio: VideoIo):
-    print("type something and hit [Enter] to send.")
-    while gio.running():
-        msg = f"~{input().replace("~", "-")}~"
-        gio.send(msg.encode())
+    try:
+        print("type something and hit [Enter] to send.")
+        while gio.running():
+            msg = input().encode()
+            gio.send(len(msg).to_bytes(2) + msg)
+    except BaseException as e:
+        logger.error(format_exception(e))
 
 
 def run(args: argparse.Namespace):
@@ -46,23 +49,10 @@ def run(args: argparse.Namespace):
         threading.Thread(target=chat_send, args=(gio,), daemon=True).start()
 
         # receiving
-        buf: str = ""
-        try:
-            while gio.running():
-                s = gio.receive(1).decode()
-                if s != "~":
-                    raise Exception("invalid message format")
-
-                buf = ""
-                while gio.running():
-                    buf += gio.receive(1).decode()
-                    if buf.endswith("~"):
-                        buf = buf[:-1]
-                        break
-
-                print(f"<<< {buf}")
-        except Exception as e:
-            print(format_exception(e))
+        while gio.running():
+            msg_len = int.from_bytes(gio.receive(2))
+            msg = gio.receive(msg_len).decode()
+            print(f"<<< {msg}")
     elif args.mode == "server":
         GoofyServer(gio)
     elif args.mode == "client":
@@ -73,7 +63,8 @@ def run(args: argparse.Namespace):
         GoofyClient(
             gio,
             host="0.0.0.0",
-            port=args.port
+            port=args.port,
+            buf_size=args.bufsize
         )
     else:
         print("invalid mode")
@@ -166,6 +157,7 @@ def main():
     )
     default = 2.
     parser.add_argument(
+        "-s",
         "--screenshot-speed",
         type=float,
         default=default,
@@ -181,6 +173,7 @@ def main():
     )
     default = 4
     parser.add_argument(
+        "-c",
         "--corrupt-packet-threshold",
         type=int,
         default=default,
@@ -194,6 +187,14 @@ def main():
         "--port",
         type=int,
         help="local SOCKS5 proxy server port in client mode"
+    )
+    default = 256
+    parser.add_argument(
+        "-b",
+        "--bufsize",
+        type=int,
+        default=default,
+        help=f"[{default=}] relay buffer size in client mode"
     )
     parser.add_argument(
         "-l",
