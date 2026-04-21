@@ -152,7 +152,7 @@ class GoofyServer:
                 )
                 self.stop()
                 return
-            self.log.info("handshake was successful")
+            self.log.info("goofy proxy handshake was successful")
 
             self._running = True
 

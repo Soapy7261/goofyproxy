@@ -930,7 +930,7 @@ class GoofyClient:
 
             # handshake: send welcome byte
             self.io.send(bytes([welcome_byte]))
-            self._log.info("handshake was successful")
+            self._log.info("goofy proxy handshake was successful")
 
             # send limits
             GoofyCommandSetLimits(
