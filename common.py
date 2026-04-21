@@ -131,14 +131,24 @@ def decode_float32(b: bytes) -> float:
         )
     return float(struct.unpack('>f', b)[0])
 
+def _actually_close_socket(sock: socket.socket):
+    try:
+        sock.close()
+    except:
+        pass
 
 def close_socket(sock: socket.socket):
     """
-    close a socket, ignoring exceptions.
+    close a socket while ignoring exceptions and without blocking the current
+    thread.
     """
     try:
-        sock.close()
-    except Exception:
+        threading.Thread(
+            target=_actually_close_socket,
+            args=(sock,),
+            daemon=True
+        ).start()
+    except:
         pass
 
 
