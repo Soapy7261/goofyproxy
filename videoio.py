@@ -62,16 +62,19 @@ class Packet:
     retransmission_req_idx: int
     idx: int
     data: bytes
+    is_compressed: bool
 
     def __init__(
         self,
         retransmission_req_idx: int | None,
         idx: int,
-        data: bytes
+        data: bytes,
+        is_compressed: bool
     ):
         self.retransmission_req_idx = retransmission_req_idx
         self.idx = idx
         self.data = data
+        self.is_compressed = is_compressed
 
     def to_bytes(self, format: Format) -> bytes:
         if self.retransmission_req_idx is None \
@@ -80,40 +83,32 @@ class Packet:
         else:
             retran_req = int(self.retransmission_req_idx)
 
-        data = self.data
-
-        compression = False
-        data_compressed = gzip.compress(data)
-        if len(data_compressed) < len(data):
-            data = data_compressed
-            compression = True
-
-        if len(data) > format.data_bytes_per_frame:
+        if len(self.data) > format.data_bytes_per_frame:
             raise ValueError(
-                f"data is too large ({data} bytes) for the format "
+                f"data is too large ({self.data} bytes) for the format "
                 f"({format})"
             )
 
-        data_checksum = compute_checksum(data)
+        data_checksum = compute_checksum(self.data)
 
-        # when using compression, increment data checksum by one. this way we
+        # if the data is compressed, increment data checksum by one. this way we
         # avoid wasting more bits for the header.
-        if compression:
+        if self.is_compressed:
             data_checksum = (data_checksum + 1) % 2**16
 
         header = \
             retran_req.to_bytes(4) \
             + self.idx.to_bytes(4) \
             + data_checksum.to_bytes(2) \
-            + len(data).to_bytes(4)
+            + len(self.data).to_bytes(4)
 
         header_checksum = compute_checksum(header)
         header = header_checksum.to_bytes(2) + header
 
-        n_trailing_zeros = format.data_bytes_per_frame - len(data)
+        n_trailing_zeros = format.data_bytes_per_frame - len(self.data)
         trailing_zeros = b"\0" * n_trailing_zeros
 
-        return header + data + trailing_zeros
+        return header + self.data + trailing_zeros
 
 
 class Format:
@@ -590,8 +585,37 @@ class VideoIo(GoofyIo):
                 raise ValueError("unknown handshake stage")
 
             force_acquire(self._out_buf_lock)
-            data = bytes(self._out_buf[:self.out_format.data_bytes_per_frame])
-            self._out_buf = self._out_buf[self.out_format.data_bytes_per_frame:]
+
+            # use compression if it's worth it
+            data_orig_size = self.out_format.data_bytes_per_frame
+            data = bytes(self._out_buf[:data_orig_size])
+            is_compressed = False
+            if len(self._out_buf) > self.out_format.data_bytes_per_frame:
+                orig_size = self.out_format.data_bytes_per_frame * 3
+                temp = gzip.compress(self._out_buf[:orig_size])
+                if len(temp) < self.out_format.data_bytes_per_frame:
+                    data_orig_size = orig_size
+                    data = temp
+                    is_compressed = True
+
+                if not is_compressed:
+                    orig_size = self.out_format.data_bytes_per_frame * 2
+                    temp = gzip.compress(self._out_buf[:orig_size])
+                    if len(temp) < self.out_format.data_bytes_per_frame:
+                        data_orig_size = orig_size
+                        data = temp
+                        is_compressed = True
+
+                if not is_compressed:
+                    orig_size = self.out_format.data_bytes_per_frame * 3 // 2
+                    temp = gzip.compress(self._out_buf[:orig_size])
+                    if len(temp) < self.out_format.data_bytes_per_frame:
+                        data_orig_size = orig_size
+                        data = temp
+                        is_compressed = True
+            self._out_buf = \
+                self._out_buf[data_orig_size:]
+
             self._out_buf_lock.release()
 
             if not data and not self._request_retransmission:
@@ -611,7 +635,8 @@ class VideoIo(GoofyIo):
             self._out_packets.append(Packet(
                 retran_req_idx,
                 len(self._out_packets) + self._out_packet_idx_offs,
-                data
+                data,
+                is_compressed
             ))
 
             self._out_packet_idx = min(
@@ -853,10 +878,13 @@ class VideoIo(GoofyIo):
             self._log.info(
                 f"found peer \"{self._peer_sender_id}\" with format "
                 f"{self._peer_format} "
-                f"({self._peer_format.data_rate() / 1024:.1f} KiB/s). please "
-                f"make sure the peer's video feed does not move around in the "
-                f"screen."
+                f"({self._peer_format.data_rate() / 1024:.1f} KiB/s)."
             )
+            self._log.info(
+                f"peer bounding box: {self._peer_aabb}. please make sure the "
+                "peer's video feed does not move around on the screen."
+            )
+
             self._handshake_stage = HandshakeStage.ShowingAck
         elif self._handshake_stage == HandshakeStage.WaitingForAck:
             qr_codes = find_qr_codes(self._take_screenshot())
