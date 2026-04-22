@@ -46,7 +46,7 @@ OUT_PACKETS_MIN_COUNT = 16  # must be bigger than 1
 QR_BORDER_FACTOR = .15
 
 HANDSHAKE_CORNER_DOT_COLOR = np.asarray([1, 0, 0], dtype=np.float32)
-HANDSHAKE_CORNER_DOT_SIZE = 5
+HANDSHAKE_CORNER_DOT_SIZE = 6
 
 # wait a little after handshake so the other side can see our acknowledgement
 HANDSHAKE_FINISH_DELAY = 1.
