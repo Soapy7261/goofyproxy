@@ -18,7 +18,7 @@ import gzip
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QLabel
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QPixmap, QPainter, QBrush, QColor
 
 import mss
 from mss.base import MSSBase
@@ -43,7 +43,10 @@ assert VIDEOIO_MIN_PEER_VERSION <= VIDEOIO_VERSION
 OUT_PACKETS_MEMORY_LIMIT = 512 * 1024 * 1024
 OUT_PACKETS_MIN_COUNT = 16  # must be bigger than 1
 
-QR_BORDER_FACTOR = .2
+QR_BORDER_FACTOR = .15
+
+HANDSHAKE_CORNER_DOT_COLOR = np.asarray([1, 0, 0], dtype=np.float32)
+HANDSHAKE_CORNER_DOT_SIZE = 5
 
 
 """
@@ -391,9 +394,9 @@ class VideoIo(GoofyIo):
         self._screenshot_speed = screenshot_speed
         self._corrupt_packet_threshold = corrupt_packet_threshold
 
-        self._log.debug(
+        self._log.info(
             f"output format: {self.out_format} "
-            f"({self.out_format.data_rate() / 1024:.1f} KiB/s)"
+            f"({format_data_rate(self.out_format.data_rate())})"
         )
 
         self._out_packets = []
@@ -549,10 +552,13 @@ class VideoIo(GoofyIo):
         try:
             # show hello QR code
             if self._handshake_stage == HandshakeStage.ShowingQr:
-                self._set_image(generate_qr(
-                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
-                    f"#{self.out_format}#hello"
-                ))
+                self._set_image(
+                    generate_qr(
+                        f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
+                        f"#{self.out_format}#hello"
+                    ),
+                    put_corner_dots_for_handshake=True
+                )
 
                 self._log.info(
                     "looking for a peer" if self._peer_sender_id is None
@@ -567,10 +573,13 @@ class VideoIo(GoofyIo):
 
             # show acknowledgement QR code
             if self._handshake_stage == HandshakeStage.ShowingAck:
-                self._set_image(generate_qr(
-                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
-                    f"#{self.out_format}#ack#{self._peer_sender_id}"
-                ))
+                self._set_image(
+                    generate_qr(
+                        f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
+                        f"#{self.out_format}#ack#{self._peer_sender_id}"
+                    ),
+                    put_corner_dots_for_handshake=True
+                )
 
                 self._log.info(
                     "waiting for the peer's acknowledgement QR code")
@@ -686,7 +695,8 @@ class VideoIo(GoofyIo):
         self,
         img: np.ndarray,
         keep_aspect_ratio: bool = True,
-        smooth: bool = True
+        smooth: bool = True,
+        put_corner_dots_for_handshake: bool = False
     ):
         if img.dtype in (np.float32, np.float64):
             img = np.round(np.clip(img, 0., 1.) * 255.)
@@ -726,6 +736,27 @@ class VideoIo(GoofyIo):
             Qt.TransformationMode.SmoothTransformation if smooth
             else Qt.TransformationMode.FastTransformation
         )
+
+        if put_corner_dots_for_handshake:
+            painter = QPainter(scaled_pixmap)
+            painter.setPen(Qt.PenStyle.NoPen)
+            color = np.round(HANDSHAKE_CORNER_DOT_COLOR *
+                             255.).astype(np.uint8)
+            painter.setBrush(QBrush(
+                QColor(*color),
+                Qt.BrushStyle.SolidPattern
+            ))
+            painter.drawRect(
+                0, 0, HANDSHAKE_CORNER_DOT_SIZE, HANDSHAKE_CORNER_DOT_SIZE
+            )
+            painter.drawRect(
+                scaled_pixmap.width() - HANDSHAKE_CORNER_DOT_SIZE,
+                scaled_pixmap.height() - HANDSHAKE_CORNER_DOT_SIZE,
+                HANDSHAKE_CORNER_DOT_SIZE,
+                HANDSHAKE_CORNER_DOT_SIZE
+            )
+            painter.end()
+
         self._label.setPixmap(scaled_pixmap)
 
     def _receive_thread_run(self):
@@ -761,7 +792,9 @@ class VideoIo(GoofyIo):
 
     def _read_screen(self):
         if self._handshake_stage == HandshakeStage.LookingForPeerQr:
-            qr_codes = find_qr_codes(self._take_screenshot())
+            img = self._take_screenshot()
+
+            qr_codes = find_qr_codes(img)
             senders: list[tuple[Aabb, str, Format]] = []
             for qr in qr_codes:
                 # skip invalid format
@@ -845,29 +878,76 @@ class VideoIo(GoofyIo):
                 bottom_right=(center_x + half_size, center_y + half_size)
             )
 
+            # approximate scale of the peer's video feed
+            rough_scale = \
+                size / min(self._peer_format.width, self._peer_format.height)
+
+            # refine qr_aabb based on the corner "dots" (squares) at the top
+            # left and bottom right.
+
+            padding = rough_scale * HANDSHAKE_CORNER_DOT_SIZE
+            img_h, img_w = img.shape[:2]
+
+            tl_x0 = int(max(0., qr_aabb.top_left[0] - padding))
+            tl_y0 = int(max(0., qr_aabb.top_left[1] - padding))
+            tl_x1 = int(min(img_w - .001, qr_aabb.top_left[0] + padding))
+            tl_y1 = int(min(img_h - .001, qr_aabb.top_left[1] + padding))
+
+            br_x0 = int(max(0., qr_aabb.bottom_right[0] - padding))
+            br_y0 = int(max(0., qr_aabb.bottom_right[1] - padding))
+            br_x1 = int(min(img_w - .001, qr_aabb.bottom_right[0] + padding))
+            br_y1 = int(min(img_h - .001, qr_aabb.bottom_right[1] + padding))
+
+            tl_window = img[tl_y0:tl_y1, tl_x0:tl_x1]
+            br_window = img[br_y0:br_y1, br_x0:br_x1]
+
+            tl_dot_aabb = find_colored_square_aabb(
+                tl_window,
+                HANDSHAKE_CORNER_DOT_COLOR
+            )
+            br_dot_aabb = find_colored_square_aabb(
+                br_window,
+                HANDSHAKE_CORNER_DOT_COLOR
+            )
+
+            if tl_dot_aabb:
+                qr_aabb.top_left = (
+                    tl_dot_aabb.top_left[0] + tl_x0,
+                    tl_dot_aabb.top_left[1] + tl_y0
+                )
+            if br_dot_aabb:
+                qr_aabb.bottom_right = (
+                    br_dot_aabb.bottom_right[0] + br_x0,
+                    br_dot_aabb.bottom_right[1] + br_y0
+                )
+
             # compute the bounding box of the peer's video feed
             if self._peer_format.width > self._peer_format.height:
+                center_x = (qr_aabb.top_left[0] + qr_aabb.bottom_right[0]) * .5
+                h = qr_aabb.bottom_right[1] - qr_aabb.top_left[1]
                 ratio = self._peer_format.width / self._peer_format.height
                 self._peer_aabb = Aabb(
                     top_left=(
-                        center_x - size * ratio * .5,
+                        center_x - h * ratio * .5,
                         qr_aabb.top_left[1]
                     ),
                     bottom_right=(
-                        center_x + size * ratio * .5,
+                        center_x + h * ratio * .5,
                         qr_aabb.bottom_right[1]
                     )
                 )
             else:
+                center_y = (qr_aabb.top_left[1] + qr_aabb.bottom_right[1]) * .5
+                w = qr_aabb.bottom_right[0] - qr_aabb.top_left[0]
                 ratio = self._peer_format.height / self._peer_format.width
                 self._peer_aabb = Aabb(
                     top_left=(
                         qr_aabb.top_left[0],
-                        center_y - size * ratio * .5
+                        center_y - w * ratio * .5
                     ),
                     bottom_right=(
                         qr_aabb.bottom_right[0],
-                        center_y + size * ratio * .5
+                        center_y + w * ratio * .5
                     )
                 )
 
@@ -878,7 +958,7 @@ class VideoIo(GoofyIo):
             self._log.info(
                 f"found peer \"{self._peer_sender_id}\" with format "
                 f"{self._peer_format} "
-                f"({self._peer_format.data_rate() / 1024:.1f} KiB/s)."
+                f"({format_data_rate(self._peer_format.data_rate())})."
             )
             self._log.info(
                 f"peer bounding box: {self._peer_aabb}. please make sure the "
@@ -1200,9 +1280,9 @@ class DetectedQr(NamedTuple):
 def qr_refine_corners(
     img_gray: np.ndarray,
     corners: list[tuple[float, float]],
-    win_size: int = 5,
+    win_size: int = 7,
     zero_zone: int = -1,
-    max_iter: int = 30,
+    max_iter: int = 50,
     eps: float = .001
 ) -> list[tuple[float, float]]:
     """
@@ -1291,6 +1371,47 @@ def find_qr_codes(img: np.ndarray) -> list[DetectedQr]:
         results.append(DetectedQr(aabb=aabb, text=text))
 
     return results
+
+
+def find_colored_square_aabb(
+    img: np.ndarray,
+    color: np.ndarray,
+    tolerance: float = .25
+) -> Aabb | None:
+    """
+    find the axis-aligned bounding box (AABB) of a square with a certain color
+    inside a floating-point image.
+
+    pixel center is 0.5.
+
+    Args:
+        img (np.ndarray): floating-point RGB image of shape (H, W, 3)
+        color (np.ndarray): floating-point RGB triplet of shape (3,)
+        tolerance (float): maximum Euclidean distance from the color
+
+    Returns:
+        an `Aabb` if the square was found, None if not.
+    """
+
+    assert img.dtype in (np.float32, np.float64)
+    assert len(img.shape) == 3 and img.shape[2] == 3
+
+    euclidean_distances = np.linalg.norm(img - color, axis=2)
+    mask = euclidean_distances < tolerance
+
+    # get pixel coordinates ((row, col) pairs) where mask==True
+    coords = np.argwhere(mask)
+
+    if len(coords) == 0:
+        return None
+
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+
+    return Aabb(
+        top_left=(float(x_min), float(y_min)),
+        bottom_right=(float(x_max) + 1., float(y_max) + 1.)
+    )
 
 
 def scale_image_u8(img: np.ndarray[np.uint8], scale: float):
