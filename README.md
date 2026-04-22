@@ -78,6 +78,13 @@ The following Python packages are required for this project.
 numpy scipy PySide6 mss Pillow qrcode pyzbar netifaces2 opencv-python
 ```
 
+## Computing Power
+
+For fast data transfer, the program needs to take and analyze many screenshots
+every second, and my code isn't super optimized (skill issue), so you're gonna
+need a fairly powerful computer to be able to keep up, otherwise the program
+will keep falling behind and asking for retransmissions.
+
 ## Fractional Scaling
 
 For more precision, try to avoid non-integer display scaling.
@@ -104,7 +111,7 @@ python ./main.py server -f 720x540-16-2@2 -S max -P bean -s 1.5 -c 4 -l debug -L
 
 And here's an example command to run as the client:
 ```bash
-python ./main.py client -p 4000 -f 720x540-16-2@2 -S bean -P max -s 1.5 -c 4 -l debug -L goofy-client-log.txt
+python ./main.py client -p 4000 -b 256 -f 720x540-16-2@2 -S bean -P max -s 1.5 -c 4 -l debug -L goofy-client-log.txt
 ```
 
 **You can run it with `-h` to see a detailed and human-readable help message.**
