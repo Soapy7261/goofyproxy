@@ -30,13 +30,17 @@ class GoofyServer:
     open and manage sockets and relay/forward internet traffic to and from the
     client.
 
-    parameters
-    ----------
-    io           : goofy ahh data channel to communicate with the goofy client
-    send_interval: interval in seconds for the send thread to send all queued
-                   outgoing packets and relay data from remote peers to the
-                   goofy client.
-    log_level    : logging level
+    Args:
+
+        io (GoofyIo):
+            goofy ahh data channel to communicate with the goofy client
+
+        send_interval (float):
+            interval in seconds for the send thread to send all queued outgoing
+            packets and relay data from remote peers to the goofy client.
+
+        log_level (int | None):
+            logging level (e.g. `logging.INFO`)
     """
 
     io: GoofyIo
@@ -97,11 +101,12 @@ class GoofyServer:
     def __init__(
         self,
         io: GoofyIo,
-        send_interval: float = .001
+        send_interval: float = .005,
+        log_level: int | None = None
     ) -> None:
         self.io = io
         self.send_interval = send_interval
-        self.log = make_logger(f"goofy server")
+        self.log = make_logger(f"goofy server", log_level)
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()

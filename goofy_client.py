@@ -75,22 +75,42 @@ class GoofyClient:
     the LAN can connect to. it then relays/forwards internet traffic to and from
     a goofy server using a `GoofyIo`.
 
-    parameters
-    ----------
-    io           : goofy ahh data channel to communicate with the goofy server
-    host         : interface to listen on for the local SOCKS5 proxy server
-    port         : port to listen on for the local SOCKS5 proxy server
-    buf_size     : relay buffer size (how many bytes to forward at a time)
-    backlog      : TCP listen backlog (queue size)
-    timeout      : socket operation (connecting and IO) timeout in seconds
-    bind_timeout : how long (seconds) a BIND socket waits for the inbound
-                   connection from the remote peer.
-    udp_timeout  : idle timeout for UDP ASSOCIATE relay threads
-    poll_interval: interval in seconds for checking socket status updates
-    send_interval: interval in seconds for the control thread to send all queued
-                   outgoing packets and relay data from local clients to the
-                   server.
-    log_level    : logging level
+    Args:
+
+        io (GoofyIo):
+            goofy ahh data channel to communicate with the goofy server
+
+        host (str):
+            interface to listen on for the local SOCKS5 proxy server
+
+        port (int):
+            port to listen on for the local SOCKS5 proxy server
+
+        buf_size (int):
+            relay buffer size (how many bytes to forward at a time)
+
+        backlog (int):
+            TCP listen backlog (queue size)
+
+        timeout (float):
+            socket operation (connecting and IO) timeout in seconds
+
+        bind_timeout (float):
+            how long (seconds) a BIND socket waits for the inbound connection
+            from the remote peer.
+
+        udp_timeout (float):
+            idle timeout for UDP ASSOCIATE relay threads
+
+        poll_interval (float):
+            interval in seconds for checking socket status updates
+
+        send_interval (float):
+            interval in seconds for the control thread to send all queued
+            outgoing packets and relay data from local clients to the server.
+
+        log_level (int | None):
+            logging level (e.g. `logging.INFO`)
     """
 
     io: GoofyIo
@@ -173,7 +193,8 @@ class GoofyClient:
         bind_timeout: float = 60.0,
         udp_timeout: float = 60.0,
         poll_interval: float = .01,
-        send_interval: float = .001
+        send_interval: float = .005,
+        log_level: int | None = None
     ) -> None:
         self.io = io
         self.host = host
@@ -185,7 +206,7 @@ class GoofyClient:
         self.udp_timeout = udp_timeout
         self.poll_interval = poll_interval
         self.send_interval = send_interval
-        self._log = make_logger(f"goofy client")
+        self._log = make_logger(f"goofy client", log_level)
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()

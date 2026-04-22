@@ -31,12 +31,13 @@ def run(args: argparse.Namespace):
         return
 
     gio = VideoIo(
-        args.format,
-        args.monitor,
-        args.sender_id,
-        args.peer_id,
-        args.screenshot_speed,
-        args.corrupt_packet_threshold
+        out_format=args.format,
+        in_monitor_idx=args.monitor,
+        sender_id=args.sender_id,
+        peer_id=args.peer_id,
+        screenshot_speed=args.screenshot_speed,
+        corrupt_packet_threshold=args.corrupt_packet_threshold,
+        handshake_finish_delay=args.handshake_finish_delay
     )
 
     if not args.start_immediately:
@@ -181,10 +182,20 @@ def main():
         "--corrupt-packet-threshold",
         type=int,
         default=default,
-        help=f"[{default=}] if we get more than this many corrupt packets "
+        help=f"[{default=}] if we get this many (or more) corrupt packets "
         "(e.g. index too far ahead or checksum unverified), we'll ask the "
         "other side to start retransmitting from the last packet index we "
         "properly received."
+    )
+    default = 2.
+    parser.add_argument(
+        "-W",
+        "--handshake-finish-delay",
+        type=float,
+        default=default,
+        help=f"[{default=}] how much to wait (in seconds) after VideoIo "
+        "handshake before starting to send packets (so the other side can see "
+        "our acknowledgement)."
     )
     parser.add_argument(
         "-p",

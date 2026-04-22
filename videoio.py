@@ -48,9 +48,6 @@ QR_BORDER_FACTOR = .15
 HANDSHAKE_CORNER_DOT_COLOR = np.asarray([1, 0, 0], dtype=np.float32)
 HANDSHAKE_CORNER_DOT_SIZE = 8
 
-# wait a little after handshake so the other side can see our acknowledgement
-HANDSHAKE_FINISH_DELAY = 1.
-
 
 """
 packet header (16 bytes):
@@ -121,7 +118,7 @@ class Format:
     """
     color grid format used to encode data.
 
-    Arguments:
+    Args:
 
       width (int): total width
 
@@ -283,7 +280,7 @@ class VideoIo(GoofyIo):
     once a `VideoIo` is created, an empty window will appear. the user has time
     to move it around if needed, then you must call `start()` to start the
     handshake process. the window must not be moved around on the screen after
-    that point.
+    that point. make sure to call `stop()` at the end for a proper clean-up.
 
     Args:
 
@@ -292,20 +289,20 @@ class VideoIo(GoofyIo):
             `{width}x{height}-{cell_size}-{bits_per_cell}@{rate}`.
             example: `720x480-16-2@5`
 
-        in_monitor_idx (int = 0):
+        in_monitor_idx (int):
             index of the monitor on which the peer's video feed is visible. you
             can use static function `get_monitors()` to get the list of
             available monitors.
 
-        sender_id (str | None = None):
+        sender_id (str | None):
             sender ID to use for the handshake process. if `None`, one will be
             generated.
 
-        peer_id (str | None = None):
+        peer_id (str | None):
             sender ID of the peer we're looking for in the handshake process.
             if `None`, the first detected peer will be chosen.
 
-        screenshot_speed (float = 2.):
+        screenshot_speed (float):
             the receive thread will take a screenshot and read the peer's video
             feed this many times for every "frame" (1 / peer_format.rate). it
             may be helpful to use a higher value for this in certain cases where
@@ -315,10 +312,17 @@ class VideoIo(GoofyIo):
             (so by taking more screenshots we effectively wait for the image
             quality to improve so we can read the data without corruption).
 
-        corrupt_packet_threshold (int = 2):
-            if we get more than this many corrupt packets (e.g. index too far
+        corrupt_packet_threshold (int):
+            if we get this many (or more) corrupt packets (e.g. index too far
             ahead or checksum unverified), we'll ask the other side to start
             retransmitting from the last packet index we properly received.
+
+        handshake_finish_delay (float):
+            how much to wait (in seconds) after handshake before starting to
+            send packets (so the other side can see our acknowledgement).
+
+        log_level (int | None):
+            logging level (e.g. `logging.INFO`)
     """
 
     _log: logging.Logger
@@ -338,8 +342,8 @@ class VideoIo(GoofyIo):
     _out_packet_idx: int = 0
     _out_packets_lock: threading.Lock
 
-    _last_retran_req_time: float = 0.
-    _last_retran_req_idx: int = -1
+    _in_last_retran_req_time: float = 0.
+    _in_last_retran_req_idx: int = -1
 
     _out_pixels: np.ndarray
 
@@ -377,6 +381,8 @@ class VideoIo(GoofyIo):
     _screenshot_speed: float
     _corrupt_packet_threshold: int
 
+    _handshake_finish_delay: float
+
     def __init__(
         self,
         out_format: str | Format,
@@ -384,9 +390,11 @@ class VideoIo(GoofyIo):
         sender_id: str | None = None,
         peer_id: str | None = None,
         screenshot_speed: float = 2.,
-        corrupt_packet_threshold: int = 2
+        corrupt_packet_threshold: int = 2,
+        handshake_finish_delay: float = 2.,
+        log_level: int | None = None
     ):
-        self._log = make_logger(f"VideoIo")
+        self._log = make_logger(f"VideoIo", log_level)
 
         self.out_format = Format.create(out_format)
         self._in_monitor_idx = int(in_monitor_idx)
@@ -397,6 +405,8 @@ class VideoIo(GoofyIo):
 
         self._screenshot_speed = screenshot_speed
         self._corrupt_packet_threshold = corrupt_packet_threshold
+
+        self._handshake_finish_delay = handshake_finish_delay
 
         self._log.info(
             f"output format: {self.out_format} "
@@ -603,7 +613,8 @@ class VideoIo(GoofyIo):
 
             # wait a little after handshake so the other side can see our
             # acknowledgement.
-            if time.time() - self._handshake_done_time < HANDSHAKE_FINISH_DELAY:
+            if time.time() - self._handshake_done_time \
+                    < self._handshake_finish_delay:
                 return
 
             force_acquire(self._out_buf_lock)
@@ -1142,14 +1153,12 @@ class VideoIo(GoofyIo):
         # handle retransmission request
         retransmission_req_idx = int.from_bytes(header[2:6])
         if retransmission_req_idx != 2**32 - 1 and (
-            self._last_retran_req_idx != retransmission_req_idx
-            or time.time() - self._last_retran_req_time > max(
-                2,
-                self._corrupt_packet_threshold
-            ) / self._peer_format.rate
+            self._in_last_retran_req_idx != retransmission_req_idx
+            or time.time() - self._in_last_retran_req_time
+            > 1. / self._peer_format.rate
         ) and packet_idx >= self._in_valid_packet_idx:
-            self._last_retran_req_idx = retransmission_req_idx
-            self._last_retran_req_time = time.time()
+            self._in_last_retran_req_idx = retransmission_req_idx
+            self._in_last_retran_req_time = time.time()
 
             force_acquire(self._out_packets_lock)
 
@@ -1220,7 +1229,7 @@ class VideoIo(GoofyIo):
         n_corrupt_packets = int(
             self._n_corrupt_receives / self._screenshot_speed
         )
-        if n_corrupt_packets > self._corrupt_packet_threshold:
+        if n_corrupt_packets >= self._corrupt_packet_threshold:
             self._n_corrupt_receives = 0
             self._request_retransmission = True
 

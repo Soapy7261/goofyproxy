@@ -66,7 +66,7 @@ class GoofyIo:
 class SocketIo(GoofyIo):
     """
     a not so `GoofyIo` that uses a socket to transfer data. useful for testing
-    or debugging.
+    and debugging.
     """
 
     sock: socket.socket
