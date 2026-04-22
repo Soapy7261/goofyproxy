@@ -106,15 +106,15 @@ open an issue.
 
 Here's an example command to run as the server:
 ```bash
-python ./main.py server -f 720x540-16-2@2 -S max -P bean -s 1.5 -c 4 -l debug -L goofy-server-log.txt
+python ./main.py server -f 720x540-12-3@1 -S max -P bean -s 1.5 -c 2 -l debug -L goofy-server-log.txt
 ```
 
 And here's an example command to run as the client:
 ```bash
-python ./main.py client -p 4000 -b 256 -f 720x540-16-2@2 -S bean -P max -s 1.5 -c 4 -l debug -L goofy-client-log.txt
+python ./main.py client -p 4000 -b 512 -f 720x540-12-3@1 -S bean -P max -s 1.5 -c 2 -l debug -L goofy-client-log.txt
 ```
 
-**You can run it with `-h` to see a detailed and human-readable help message.**
+**Run the script with `-h` to see a detailed and human-readable help message.**
 
 # Disclaimer
 
