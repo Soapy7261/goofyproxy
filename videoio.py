@@ -46,7 +46,7 @@ OUT_PACKETS_MIN_COUNT = 16  # must be bigger than 1
 QR_BORDER_FACTOR = .15
 
 HANDSHAKE_CORNER_DOT_COLOR = np.asarray([1, 0, 0], dtype=np.float32)
-HANDSHAKE_CORNER_DOT_SIZE = 6
+HANDSHAKE_CORNER_DOT_SIZE = 8
 
 # wait a little after handshake so the other side can see our acknowledgement
 HANDSHAKE_FINISH_DELAY = 1.
@@ -315,7 +315,7 @@ class VideoIo(GoofyIo):
             (so by taking more screenshots we effectively wait for the image
             quality to improve so we can read the data without corruption).
 
-        corrupt_packet_threshold (int = 4):
+        corrupt_packet_threshold (int = 2):
             if we get more than this many corrupt packets (e.g. index too far
             ahead or checksum unverified), we'll ask the other side to start
             retransmitting from the last packet index we properly received.
@@ -384,7 +384,7 @@ class VideoIo(GoofyIo):
         sender_id: str | None = None,
         peer_id: str | None = None,
         screenshot_speed: float = 2.,
-        corrupt_packet_threshold: int = 4
+        corrupt_packet_threshold: int = 2
     ):
         self._log = make_logger(f"VideoIo")
 
@@ -1129,15 +1129,25 @@ class VideoIo(GoofyIo):
                 self.n_corrupt_receives_increment()
             return
 
+        packet_idx = int.from_bytes(header[6:10])
+        data_checksum = int.from_bytes(header[10:12])
+        data_len = int.from_bytes(header[12:16])
+        if len(data) < data_len:
+            raise Exception(
+                f"packet's data length ({len(data)} bytes) is smaller than the "
+                f"reported value in the header ({data_len} bytes)."
+            )
+        data = data[:data_len]
+
         # handle retransmission request
         retransmission_req_idx = int.from_bytes(header[2:6])
         if retransmission_req_idx != 2**32 - 1 and (
             self._last_retran_req_idx != retransmission_req_idx
             or time.time() - self._last_retran_req_time > max(
-                4,
+                2,
                 self._corrupt_packet_threshold
             ) / self._peer_format.rate
-        ):
+        ) and packet_idx >= self._in_valid_packet_idx:
             self._last_retran_req_idx = retransmission_req_idx
             self._last_retran_req_time = time.time()
 
@@ -1155,16 +1165,6 @@ class VideoIo(GoofyIo):
             )
 
             self._out_packets_lock.release()
-
-        packet_idx = int.from_bytes(header[6:10])
-        data_checksum = int.from_bytes(header[10:12])
-        data_len = int.from_bytes(header[12:16])
-        if len(data) < data_len:
-            raise Exception(
-                f"packet's data length ({len(data)} bytes) is smaller than the "
-                f"reported value in the header ({data_len} bytes)."
-            )
-        data = data[:data_len]
 
         # verify data checksum and packet index
 

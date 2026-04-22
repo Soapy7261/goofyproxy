@@ -173,7 +173,7 @@ def main():
         "effectively wait for the image quality to improve so we can read the "
         "data without corruption)."
     )
-    default = 4
+    default = 2
     parser.add_argument(
         "-c",
         "--corrupt-packet-threshold",
