@@ -200,6 +200,7 @@ class GoofyClient:
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_sock.bind((self.host, self.port))
         self._server_sock.listen(self.backlog)
+        self._server_sock.settimeout(2.)
         self._running = True
 
         msg = f"local SOCKS5 proxy server running on {self.host}:{self.port}"
@@ -223,6 +224,9 @@ class GoofyClient:
             while self._running:
                 try:
                     client_sock, client_addr = self._server_sock.accept()
+                except socket.timeout:
+                    # avoid blocking forever so we can get KeyboardInterrupt
+                    continue
                 except Exception as e:
                     self._log.fatal(f"accept failed: {format_exception(e)}")
                     break

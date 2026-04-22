@@ -55,6 +55,7 @@ def run(args: argparse.Namespace):
             print(f"<<< {msg}")
     elif args.mode == "server":
         GoofyServer(gio)
+        gio.stop()
     elif args.mode == "client":
         if not args.port:
             print("port is required in client mode")
@@ -66,6 +67,7 @@ def run(args: argparse.Namespace):
             port=args.port,
             buf_size=args.bufsize
         )
+        gio.stop()
     else:
         print("invalid mode")
 
