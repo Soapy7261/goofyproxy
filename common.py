@@ -226,6 +226,25 @@ def format_bytes(b: bytes) -> str:
     return b.hex('|').upper()
 
 
+def format_data_size(n_bytes: int) -> str:
+    if n_bytes < 1024:
+        return f"{n_bytes} bytes"
+    elif n_bytes < 1024 ** 2:
+        return f"{n_bytes / 1024.:.1f} KiB"
+    elif n_bytes < 1024 ** 3:
+        return f"{n_bytes / (1024. ** 2.):.1f} MiB"
+    elif n_bytes < 1024 ** 4:
+        return f"{n_bytes / (1024. ** 3.):.1f} GiB"
+    elif n_bytes < 1024 ** 5:
+        return f"{n_bytes / (1024. ** 4.):.1f} TiB"
+    else:
+        return f"{n_bytes / (1024. ** 5.):.1f} PiB"
+
+
+def format_data_rate(n_bytes_per_second: int) -> str:
+    return format_data_size(n_bytes_per_second) + "/s"
+
+
 def goofy_handshake_solve(question: bytes) -> tuple[bytes, int]:
     if len(question) < 8:
         raise ValueError("goofy handshake question too small")
