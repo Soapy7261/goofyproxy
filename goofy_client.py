@@ -201,9 +201,13 @@ class GoofyClient:
         self._server_sock.bind((self.host, self.port))
         self._server_sock.listen(self.backlog)
         self._running = True
-        self._log.info(
-            f"local SOCKS5 proxy server running on {self.host}:{self.port}"
-        )
+
+        msg = f"local SOCKS5 proxy server running on {self.host}:{self.port}"
+        if self.host == "0.0.0.0":
+            machine_ips = get_machine_ips()
+            if machine_ips:
+                msg += f" ({", ".join(machine_ips)})"
+        self._log.info(msg)
 
         # start the control thread
         self._control_thread = threading.Thread(
