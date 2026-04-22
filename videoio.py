@@ -526,7 +526,7 @@ class VideoIo(GoofyIo):
             self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._window.setCentralWidget(self._label)
 
-            self._timer = QTimer()
+            self._timer = QTimer(timerType=Qt.TimerType.PreciseTimer)
             self._timer.timeout.connect(self._update_image)
             self._timer.start(1000. / self.out_format.rate)
 
@@ -541,7 +541,14 @@ class VideoIo(GoofyIo):
         if self._stopping:
             try:
                 if self._app:
-                    self._app.quit()
+                    try:
+                        self._window.close()
+                    except Exception:
+                        pass
+                    try:
+                        self._app.quit()
+                    except Exception:
+                        pass
                     self._app = None
             except Exception:
                 pass
