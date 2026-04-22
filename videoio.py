@@ -17,7 +17,7 @@ import zlib
 import gzip
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QLabel
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap, QPainter, QBrush, QColor
 
 import mss
@@ -360,7 +360,6 @@ class VideoIo(GoofyIo):
     _window: QMainWindow
     _label: QLabel
     _timer: QTimer
-    _stop_signal: Signal | None = None
 
     _sct: MSSBase | None = None
     _monitor: Monitor | None = None
@@ -462,10 +461,6 @@ class VideoIo(GoofyIo):
 
     def stop(self):
         self._stopping = True
-        try:
-            self._stop_signal.emit()
-        except Exception:
-            pass
 
     def get_monitors() -> list[Monitor]:
         sct = mss.mss()
@@ -533,13 +528,8 @@ class VideoIo(GoofyIo):
 
             self._timer = QTimer()
             self._timer.timeout.connect(self._update_image)
-
-            self._stop_signal = Signal()
-            self._stop_signal.connect(self._timer.stop)
-            self._stop_signal.connect(self._window.destroy)
-            self._stop_signal.connect(self._app.quit)
-
             self._timer.start(1000. / self.out_format.rate)
+
             self._window.show()
             self._app.exec()
         except BaseException as e:
@@ -548,7 +538,16 @@ class VideoIo(GoofyIo):
             self.stop()
 
     def _update_image(self):
-        if not self._started or self._stopping:
+        if self._stopping:
+            try:
+                if self._app:
+                    self._app.quit()
+                    self._app = None
+            except Exception:
+                pass
+            return
+
+        if not self._started:
             return
 
         try:
