@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 import struct
 import io
+import ipaddress
+import netifaces
 
 from goofyio import *
 
@@ -130,6 +132,21 @@ def decode_float32(b: bytes) -> float:
             f"need exactly 4 bytes to decode a float32 (got {len(b)} bytes)"
         )
     return float(struct.unpack('>f', b)[0])
+
+
+def get_machine_ips():
+    ips: list[str] = []
+    for iface in netifaces.interfaces():
+        addrs = netifaces.ifaddresses(iface)
+        if netifaces.AF_INET in addrs:
+            for addr in addrs[netifaces.AF_INET]:
+                ip = addr['addr']
+                try:
+                    temp = ipaddress.ip_address(ip)
+                    ips.append(ip)
+                except ValueError:
+                    continue
+    return ips
 
 
 def _actually_close_socket(sock: socket.socket):
