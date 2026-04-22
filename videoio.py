@@ -517,15 +517,15 @@ class VideoIo(GoofyIo):
 
             self._window = QMainWindow()
             self._window.setWindowTitle(f"VideoIo - {self._sender_id}")
+            pix_ratio = self._window.devicePixelRatio()
             self._window.setFixedSize(
-                self.out_format.width / self._window.devicePixelRatio(),
-                self.out_format.height / self._window.devicePixelRatio()
+                self.out_format.width / pix_ratio,
+                self.out_format.height / pix_ratio
             )
             self._window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
             self._window.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint)
 
             # show warning for non-integer display scaling
-            pix_ratio = self._window.devicePixelRatio()
             if abs(pix_ratio - round(pix_ratio)) > .0001:
                 self._log.warning(
                     f"non-integer display scaling detected (x{pix_ratio}). "
