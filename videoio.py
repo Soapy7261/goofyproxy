@@ -120,17 +120,23 @@ class Format:
 
     Args:
 
-      width (int): total width
+        width (int):
+            total width. will be rounded down to fit an integer number of cells.
 
-      height (int): total height
+        height (int):
+            total height. will be rounded down to fit an integer number of
+            cells.
 
-      cell_size (int): width and height of individual cells
+        cell_size (int):
+            width and height of individual cells
 
-      bits_per_cell (int): how many bits to encode in each cell. the total
-          number of possible colors will be 2 to the power of this number (e.g.
-          16 possible colors for 4 bits).
+        bits_per_cell (int):
+            how many bits to encode in each cell. the total number of possible
+            colors will be 2 to the power of this number (e.g. 16 possible
+            colors for 4 bits).
 
-      rate (float): how many times per second to update the colors
+        rate (float):
+            how many times per second to update the colors
     """
 
     width: int
@@ -141,6 +147,7 @@ class Format:
 
     res_x: int
     res_y: int
+    n_cells: int
 
     bytes_per_frame: int
     data_bytes_per_frame: int
@@ -176,6 +183,10 @@ class Format:
 
         self.res_x = width // cell_size
         self.res_y = height // cell_size
+        self.n_cells = self.res_x * self.res_y
+
+        self.width = self.res_x * self.cell_size
+        self.height = self.res_y * self.cell_size
 
         self.bytes_per_frame = self.res_x * self.res_y * self.bits_per_cell // 8
         self.data_bytes_per_frame = self.bytes_per_frame - PACKET_HEADER_BYTES
@@ -183,7 +194,8 @@ class Format:
         if self.data_bytes_per_frame < 1:
             raise ValueError(
                 f"grid resolution is too low to contain real data "
-                f"(data_bytes_per_frame={self.data_bytes_per_frame})."
+                f"(data_bytes_per_frame={self.data_bytes_per_frame}, "
+                f"self={self})."
             )
 
     def data_rate(self) -> float:
@@ -1040,63 +1052,41 @@ class VideoIo(GoofyIo):
         # take a screenshot
         img = self._take_screenshot()
 
-        # scale up the image to handle non-integer AABB's more precisely and
-        # then convert to float32.
-        SCALE = 2.
-        img = scale_image_u8(img, SCALE).astype(np.float32) / 255.
-
-        # scaled peer AABB
-        x0 = int(self._peer_aabb.top_left[0] * SCALE)
-        y0 = int(self._peer_aabb.top_left[1] * SCALE)
-        x1 = int(self._peer_aabb.bottom_right[0] * SCALE)
-        y1 = int(self._peer_aabb.bottom_right[1] * SCALE)
-        w = x1 - x0
-        h = y1 - y0
-
+        # crop into peer AABB
+        x0 = int(self._peer_aabb.top_left[0])
+        y0 = int(self._peer_aabb.top_left[1])
+        x1 = int(self._peer_aabb.bottom_right[0])
+        y1 = int(self._peer_aabb.bottom_right[1])
         if x0 < 0. or y1 < 0. or x1 > img.shape[1] or y1 > img.shape[0]:
-            raise RuntimeError(
+            self._log.error(
                 f"peer's video feed is not fully contained inside the monitor ("
-                f"{x0=}, {y0=}, {x1=}, {y1=}, {img.shape=}, {SCALE=})."
+                f"{x0=}, {y0=}, {x1=}, {y1=}, {img.shape=})."
             )
+            return
+        img = img[y0:y1, x0:x1]
 
-        cell_x = np.arange(self._peer_format.res_x, dtype=np.float32)
-        cell_y = np.arange(self._peer_format.res_y, dtype=np.float32)
+        # resize to the original format size and then convert to float32
+        img = resize_image_u8(
+            img,
+            (self._peer_format.width, self._peer_format.height),
+            Image.Resampling.BILINEAR
+        ).astype(np.float32) / 255.
 
-        cell_x0 = (
-            x0 + w * (cell_x / self._peer_format.res_x)
-        ).astype(np.int32)
-        cell_x1 = (
-            x0 + w * ((cell_x + 1.) / self._peer_format.res_x)
-        ).astype(np.int32)
-        cell_y0 = (
-            y0 + h * (cell_y / self._peer_format.res_y)
-        ).astype(np.int32)
-        cell_y1 = (
-            y0 + h * ((cell_y + 1.) / self._peer_format.res_y)
-        ).astype(np.int32)
-
-        # create meshgrid of cell indices
-        x_indices, y_indices = np.meshgrid(
-            cell_x.astype(np.int32),
-            cell_y.astype(np.int32),
-            indexing='xy'
+        # split into cells.
+        # new shape: (res_y, cell_size, res_x, cell_size, 3)
+        img = img.reshape(
+            self._peer_format.res_y,
+            self._peer_format.cell_size,
+            self._peer_format.res_x,
+            self._peer_format.cell_size,
+            3  # RGB
         )
 
-        # flatten for easier processing
-        x0_flat = cell_x0[x_indices.ravel()]
-        x1_flat = cell_x1[x_indices.ravel()]
-        y0_flat = cell_y0[y_indices.ravel()]
-        y1_flat = cell_y1[y_indices.ravel()]
+        # extract the average color for each cell
+        img = img.mean(axis=(1, 3))
 
-        # extract the average color for every cell
-        colors = []
-        for i in range(len(x0_flat)):
-            cell_average_color = np.mean(
-                img[y0_flat[i]:y1_flat[i], x0_flat[i]:x1_flat[i]],
-                axis=(0, 1)
-            )
-            colors.append(cell_average_color)
-        colors = np.array(colors)
+        # flatten to get a single list of colors
+        colors = img.reshape(self._peer_format.n_cells, 3)
 
         # for every color, find the index of the closest color in the palette
         color_indices = np.argmin(
@@ -1222,7 +1212,10 @@ class VideoIo(GoofyIo):
 
     def _take_screenshot(self) -> np.ndarray:
         screenshot = self._sct.grab(self._monitor)
-        return np.array(screenshot)[:, :, :3][:, :, ::-1]  # BGRA → RGB
+        return np.array(
+            screenshot,
+            dtype=np.uint8
+        )[:, :, :3][:, :, ::-1]  # BGRA → RGB
 
     def n_corrupt_receives_increment(self):
         self._n_corrupt_receives += 1
@@ -1460,13 +1453,12 @@ def find_colored_square_aabb(
     )
 
 
-def scale_image_u8(img: np.ndarray[np.uint8], scale: float):
+def resize_image_u8(
+    img: np.ndarray[np.uint8],
+    new_size: tuple[int, int],
+    interpolation: Image.Resampling = Image.Resampling.BILINEAR
+):
+    assert img.dtype == np.uint8, f"{img.dtype=} is not uint8"
     img_pil = Image.fromarray(img)
-
-    h, w = img.shape[:2]
-    img_scaled = img_pil.resize(
-        (int(w * scale), int(h * scale)),
-        Image.Resampling.BILINEAR
-    )
-
-    return np.array(img_scaled)
+    img_pil = img_pil.resize(new_size, interpolation)
+    return np.array(img_pil)
