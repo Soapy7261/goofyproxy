@@ -14,6 +14,7 @@ from typing import NamedTuple
 import numpy as np
 from scipy.spatial.distance import cdist
 import zlib
+import gzip
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QLabel
 from PySide6.QtCore import QTimer, Qt
@@ -50,7 +51,7 @@ packet header (16 bytes):
 [2 bytes] header checksum
 [4 bytes] retransmission request packet index (FFFFFFFF if none)
 [4 bytes] packet index
-[2 bytes] packet data checksum
+[2 bytes] packet data checksum (or plus 1 to mark data as compressed)
 [4 bytes] packet data length in bytes
 """
 
@@ -79,27 +80,40 @@ class Packet:
         else:
             retran_req = int(self.retransmission_req_idx)
 
+        data = self.data
+
+        compression = False
+        data_compressed = gzip.compress(data)
+        if len(data_compressed) < len(data):
+            data = data_compressed
+            compression = True
+
+        if len(data) > format.data_bytes_per_frame:
+            raise ValueError(
+                f"data is too large ({data} bytes) for the format "
+                f"({format})"
+            )
+
+        data_checksum = compute_checksum(data)
+
+        # when using compression, increment data checksum by one. this way we
+        # avoid wasting more bits for the header.
+        if compression:
+            data_checksum = (data_checksum + 1) % 2**16
+
         header = \
             retran_req.to_bytes(4) \
             + self.idx.to_bytes(4) \
-            + compute_checksum(self.data).to_bytes(2) \
-            + len(self.data).to_bytes(4)
+            + data_checksum.to_bytes(2) \
+            + len(data).to_bytes(4)
 
         header_checksum = compute_checksum(header)
         header = header_checksum.to_bytes(2) + header
 
-        if len(self.data) > format.data_bytes_per_frame:
-            raise ValueError(
-                f"data is too large ({len(self.data)} bytes) for the format "
-                f"({format})"
-            )
-
-        data = self.data
-
         n_trailing_zeros = format.data_bytes_per_frame - len(data)
-        data += b"\0" * n_trailing_zeros
+        trailing_zeros = b"\0" * n_trailing_zeros
 
-        return header + data
+        return header + data + trailing_zeros
 
 
 class Format:
@@ -155,9 +169,9 @@ class Format:
             raise ValueError(
                 f"cell_size={self.cell_size} is smaller than 1"
             )
-        if self.bits_per_cell not in range(1, 9):
+        if self.bits_per_cell not in range(1, 7):
             raise ValueError(
-                f"bits_per_cell={self.bits_per_cell} is not in the [1, 8] range"
+                f"bits_per_cell={self.bits_per_cell} is not in the [1, 6] range"
             )
         if self.rate < .1:
             raise ValueError(f"rate={self.rate} is too low")
@@ -243,16 +257,10 @@ COLOR_PALETTES = {
     4: np.asarray([[0, 0, 0], [0, 0, 127], [0, 0, 255], [0, 127, 255], [0, 255, 255], [0, 255, 127], [0, 255, 0], [127, 255, 0], [255, 255, 0], [255, 255, 127], [255, 255, 255], [255, 127, 255], [255, 0, 255], [255, 0, 127], [255, 0, 0], [127, 127, 127]], dtype=np.uint8),
 
     # 5-bit: 32 colors
-    # 5: np.asarray([[131, 86, 51], [64, 175, 104], [197, 27, 157], [31, 116, 211], [164, 205, 8], [97, 57, 61], [231, 145, 115], [14, 234, 168], [147, 7, 221], [81, 96, 19], [214, 185, 72], [47, 37, 125], [181, 126, 179], [114, 214, 232], [247, 66, 29], [6, 155, 83], [139, 244, 136], [72, 17, 189], [206, 106, 243], [39, 195, 40], [172, 47, 93], [106, 136, 147], [239, 224, 200], [22, 76, 253], [156, 165, 0], [89, 254, 53], [222, 1, 106], [56, 89, 159], [189, 178, 213], [122, 30, 10], [255, 119, 63], [2, 208, 117]], dtype=np.uint8),
+    5: np.asarray([[131, 86, 51], [64, 175, 104], [197, 27, 157], [31, 116, 211], [164, 205, 8], [97, 57, 61], [231, 145, 115], [14, 234, 168], [147, 7, 221], [81, 96, 19], [214, 185, 72], [47, 37, 125], [181, 126, 179], [114, 214, 232], [247, 66, 29], [6, 155, 83], [139, 244, 136], [72, 17, 189], [206, 106, 243], [39, 195, 40], [172, 47, 93], [106, 136, 147], [239, 224, 200], [22, 76, 253], [156, 165, 0], [89, 254, 53], [222, 1, 106], [56, 89, 159], [189, 178, 213], [122, 30, 10], [255, 119, 63], [2, 208, 117]], dtype=np.uint8),
 
     # 6-bit: 64 colors
-    # 6: np.asarray([[129, 85, 50], [63, 172, 102], [194, 27, 155], [30, 114, 207], [161, 201, 8], [96, 56, 60], [227, 143, 113], [14, 230, 165], [145, 7, 218], [79, 95, 18], [210, 182, 71], [47, 36, 123], [178, 124, 176], [112, 211, 228], [243, 65, 29], [6, 153, 81], [137, 240, 134], [71, 17, 186], [202, 104, 239], [38, 192, 39], [169, 46, 92], [104, 133, 144], [235, 221, 197], [22, 75, 249], [153, 163, 0], [88, 250, 52], [219, 1, 104], [55, 88, 157], [186, 175, 209], [120, 30, 10], [251, 117, 62], [2, 205, 115], [133, 59, 167], [67, 146, 220], [198, 234, 21], [34, 10, 73], [165, 98, 125], [100, 185, 178], [231, 40, 230], [18, 127, 31], [149, 214, 83], [83, 69, 136], [215, 156, 188], [51, 243, 241], [182, 20, 41], [116, 107, 94], [247, 195, 146], [10, 49, 199], [141, 137, 251], [75, 224, 2], [206, 78, 54], [43, 166, 107], [174, 253, 159], [108, 4, 211], [239, 91, 12], [26, 179, 65], [157, 33, 117], [92, 120, 169], [223, 208, 222], [59, 62, 23], [190, 150, 75], [124, 237, 127], [255, 14, 180], [0, 101, 232]], dtype=np.uint8),
-
-    # 7-bit: 128 colors
-    # 7: np.asarray([[128, 85, 51], [64, 171, 102], [193, 28, 154], [31, 114, 206], [161, 200, 9], [96, 57, 61], [225, 143, 113], [15, 229, 164], [144, 9, 216], [80, 95, 20], [209, 181, 71], [48, 37, 123], [177, 124, 175], [112, 210, 227], [241, 66, 30], [7, 152, 82], [136, 238, 133], [72, 18, 185], [201, 104, 237], [39, 191, 40], [169, 47, 92], [104, 133, 144], [233, 219, 195], [23, 76, 247], [153, 162, 1], [88, 248, 53], [217, 2, 105], [56, 88, 156], [185, 175, 208], [120, 31, 11], [249, 117, 63], [3, 203, 115], [132, 60, 167], [68, 146, 218], [197, 232, 22], [35, 12, 74], [165, 98, 125], [100, 184, 177], [229, 41, 229], [19, 127, 32], [148, 213, 84], [84, 69, 136], [213, 155, 187], [52, 242, 239], [181, 21, 43], [116, 108, 94], [245, 194, 146], [11, 50, 198], [140, 136, 249], [76, 222, 3], [205, 79, 55], [44, 165, 107], [173, 251, 158], [108, 5, 210], [237, 92, 14], [27, 178, 65], [157, 34, 117], [92, 120, 169], [221, 206, 220], [60, 63, 24], [189, 149, 76], [124, 235, 127], [253, 15, 179], [1, 101, 231], [130, 187, 34], [66, 44, 86], [195, 130, 138], [33, 216, 189], [163, 72, 241], [98, 159, 45], [227, 245, 96], [17, 25, 148], [146, 111, 200], [82, 197, 251], [211, 53, 5], [50, 139, 57], [179, 226, 109], [114, 82, 160], [243, 168, 212], [9, 254, 16], [138, 0, 67], [74, 86, 119], [203, 172, 171], [41, 29, 222], [171, 115, 26], [106, 201, 78], [235, 58, 129], [25, 144, 181], [155, 230, 233], [90, 10, 36], [219, 96, 88], [58, 182, 140], [187, 38, 191], [122, 125, 243], [251, 211, 47], [5, 67, 98], [134, 153, 150], [70, 239, 202], [199, 19, 253], [37, 105, 7], [167, 192, 59], [102, 48, 111], [231, 134, 162], [21, 220, 214], [151, 77, 18], [86, 163, 69], [215, 249, 121], [54, 3, 173], [183, 89, 224], [118, 176, 28], [247, 32, 80], [13, 118, 131], [142, 204, 183], [78, 61, 235], [207, 147, 38], [46, 233, 90], [175, 13, 142], [110, 99, 193], [239, 185, 245], [29, 42, 49], [159, 128, 100], [94, 214, 152], [223, 70, 204], [62, 156, 255], [191, 243, 0], [126, 22, 51], [255, 109, 103], [0, 195, 155]], dtype=np.uint8),
-
-    # 8-bit: 256 colors
-    # 8: np.asarray([[128, 85, 51], [63, 171, 102], [192, 28, 154], [31, 114, 205], [160, 199, 9], [96, 56, 61], [224, 142, 112], [15, 228, 164], [144, 9, 215], [80, 94, 20], [208, 180, 71], [47, 37, 123], [176, 123, 174], [112, 209, 226], [240, 66, 30], [7, 152, 82], [136, 237, 133], [72, 18, 184], [200, 104, 236], [39, 190, 40], [168, 47, 92], [104, 133, 143], [232, 218, 195], [23, 75, 246], [152, 161, 1], [88, 247, 53], [216, 2, 104], [55, 88, 156], [184, 174, 207], [120, 31, 12], [248, 117, 63], [3, 202, 114], [132, 60, 166], [68, 145, 217], [196, 231, 22], [35, 12, 73], [164, 98, 125], [100, 183, 176], [228, 40, 228], [19, 126, 32], [148, 212, 84], [84, 69, 135], [212, 155, 187], [51, 241, 238], [180, 21, 42], [116, 107, 94], [244, 193, 145], [11, 50, 197], [140, 136, 248], [76, 222, 3], [204, 79, 55], [43, 164, 106], [172, 250, 158], [108, 6, 209], [236, 91, 14], [27, 177, 65], [156, 34, 117], [92, 120, 168], [220, 206, 219], [59, 63, 24], [188, 148, 75], [124, 234, 127], [252, 15, 178], [1, 101, 230], [130, 187, 34], [65, 44, 86], [194, 129, 137], [33, 215, 189], [162, 72, 240], [98, 158, 44], [226, 244, 96], [17, 25, 147], [146, 110, 199], [82, 196, 250], [210, 53, 5], [49, 139, 57], [178, 225, 108], [114, 82, 160], [242, 168, 211], [9, 253, 16], [138, 0, 67], [74, 86, 119], [202, 172, 170], [41, 29, 222], [170, 115, 26], [106, 200, 77], [234, 57, 129], [25, 143, 180], [154, 229, 232], [90, 10, 36], [218, 96, 88], [57, 181, 139], [186, 38, 191], [122, 124, 242], [250, 210, 47], [5, 67, 98], [134, 153, 149], [70, 238, 201], [198, 19, 252], [37, 105, 7], [166, 191, 59], [102, 48, 110], [230, 134, 162], [21, 219, 213], [150, 76, 18], [86, 162, 69], [214, 248, 121], [53, 3, 172], [182, 89, 224], [118, 175, 28], [246, 32, 79], [13, 118, 131], [142, 204, 182], [78, 61, 234], [206, 146, 38], [45, 232, 90], [174, 13, 141], [110, 99, 193], [238, 184, 244], [29, 42, 49], [158, 127, 100], [94, 213, 152], [222, 70, 203], [61, 156, 254], [190, 242, 0], [126, 22, 51], [254, 108, 103], [0, 194, 154], [129, 51, 205], [64, 137, 10], [193, 223, 61], [32, 80, 113], [161, 165, 164], [97, 251, 216], [225, 7, 20], [16, 92, 72], [145, 178, 123], [81, 35, 175], [209, 121, 226], [48, 207, 30], [177, 64, 82], [113, 150, 133], [241, 235, 185], [8, 16, 236], [137, 102, 41], [73, 188, 92], [201, 45, 144], [40, 130, 195], [169, 216, 247], [105, 73, 2], [233, 159, 53], [24, 245, 105], [153, 26, 156], [89, 111, 208], [217, 197, 12], [56, 54, 63], [185, 140, 115], [121, 226, 166], [249, 83, 218], [4, 169, 22], [133, 254, 74], [69, 1, 125], [197, 87, 177], [36, 173, 228], [165, 30, 33], [101, 116, 84], [229, 201, 135], [20, 58, 187], [149, 144, 238], [85, 230, 43], [213, 11, 94], [52, 97, 146], [181, 182, 197], [117, 39, 249], [245, 125, 4], [12, 211, 55], [141, 68, 107], [77, 154, 158], [205, 240, 210], [44, 20, 14], [173, 106, 65], [109, 192, 117], [237, 49, 168], [28, 135, 220], [157, 220, 24], [93, 78, 76], [221, 163, 127], [60, 249, 179], [189, 4, 230], [125, 90, 35], [253, 176, 86], [2, 33, 138], [131, 119, 189], [67, 205, 240], [195, 62, 45], [34, 147, 96], [163, 233, 148], [99, 14, 199], [227, 100, 251], [18, 186, 6], [147, 43, 57], [83, 128, 109], [211, 214, 160], [50, 71, 212], [179, 157, 16], [115, 243, 68], [243, 24, 119], [10, 109, 170], [139, 195, 222], [75, 52, 26], [203, 138, 78], [42, 224, 129], [171, 81, 181], [107, 166, 232], [235, 252, 37], [26, 8, 88], [155, 93, 140], [91, 179, 191], [219, 36, 243], [58, 122, 47], [187, 208, 98], [123, 65, 150], [251, 151, 201], [6, 236, 253], [135, 17, 8], [71, 103, 59], [199, 189, 111], [38, 46, 162], [167, 132, 214], [103, 217, 18], [231, 74, 70], [22, 160, 121], [151, 246, 173], [87, 27, 224], [215, 112, 28], [54, 198, 80], [183, 55, 131], [119, 141, 183], [247, 227, 234], [14, 84, 39], [143, 170, 90], [79, 255, 142], [207, 0, 193], [46, 85, 245], [175, 171, 49], [111, 28, 100], [239, 114, 152], [30, 200, 203], [159, 57, 255], [95, 142, 0], [223, 228, 51], [62, 9, 103], [191, 95, 154], [127, 181, 206], [255, 38, 10], [0, 123, 62]], dtype=np.uint8),
+    6: np.asarray([[129, 85, 50], [63, 172, 102], [194, 27, 155], [30, 114, 207], [161, 201, 8], [96, 56, 60], [227, 143, 113], [14, 230, 165], [145, 7, 218], [79, 95, 18], [210, 182, 71], [47, 36, 123], [178, 124, 176], [112, 211, 228], [243, 65, 29], [6, 153, 81], [137, 240, 134], [71, 17, 186], [202, 104, 239], [38, 192, 39], [169, 46, 92], [104, 133, 144], [235, 221, 197], [22, 75, 249], [153, 163, 0], [88, 250, 52], [219, 1, 104], [55, 88, 157], [186, 175, 209], [120, 30, 10], [251, 117, 62], [2, 205, 115], [133, 59, 167], [67, 146, 220], [198, 234, 21], [34, 10, 73], [165, 98, 125], [100, 185, 178], [231, 40, 230], [18, 127, 31], [149, 214, 83], [83, 69, 136], [215, 156, 188], [51, 243, 241], [182, 20, 41], [116, 107, 94], [247, 195, 146], [10, 49, 199], [141, 137, 251], [75, 224, 2], [206, 78, 54], [43, 166, 107], [174, 253, 159], [108, 4, 211], [239, 91, 12], [26, 179, 65], [157, 33, 117], [92, 120, 169], [223, 208, 222], [59, 62, 23], [190, 150, 75], [124, 237, 127], [255, 14, 180], [0, 101, 232]], dtype=np.uint8),
 }
 
 
@@ -502,6 +510,14 @@ class VideoIo(GoofyIo):
                 self.out_format.height / self._window.devicePixelRatio()
             )
             self._window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+
+            # show warning for non-integer display scaling
+            pix_ratio = self._window.devicePixelRatio()
+            if abs(pix_ratio - round(pix_ratio)) > .0001:
+                self._log.warning(
+                    f"non-integer display scaling detected (x{pix_ratio}). "
+                    "precision may be reduced."
+                )
 
             self._label = QLabel()
             self._label.setScaledContents(False)
@@ -959,9 +975,11 @@ class VideoIo(GoofyIo):
                 f"bug in the code."
             )
 
+        # extract header and data
         header = data[:PACKET_HEADER_BYTES]
         data = data[PACKET_HEADER_BYTES:]
 
+        # verify header checksum
         header_checksum = int.from_bytes(header[:2])
         header_actual_checksum = compute_checksum(header[2:])
         if header_checksum != header_actual_checksum:
@@ -975,9 +993,10 @@ class VideoIo(GoofyIo):
                 self._log.debug(
                     "corrupt receive: header checksum couldn't be verified"
                 )
-                self.n_corrupt_receives_incr()
+                self.n_corrupt_receives_increment()
             return
 
+        # handle retransmission request
         retransmission_req_idx = int.from_bytes(header[2:6])
         if retransmission_req_idx != 2**32 - 1 and (
             self._last_retran_req_idx != retransmission_req_idx
@@ -1014,9 +1033,20 @@ class VideoIo(GoofyIo):
             )
         data = data[:data_len]
 
-        checksum_verified = True
+        # verify data checksum and packet index
+
         if data_len > 0:
-            checksum_verified = (data_checksum == compute_checksum(data))
+            correct_checksum = compute_checksum(data)
+            if data_checksum == correct_checksum:
+                checksum_verified = True
+            elif data_checksum == (correct_checksum + 1) % 2**16:
+                # data is compressed, decompress it
+                checksum_verified = True
+                data = gzip.decompress(data)
+            else:
+                checksum_verified = False
+        else:
+            checksum_verified = True
 
         if packet_idx < self._in_valid_packet_idx:
             # we've already received this packet index, ignore
@@ -1027,7 +1057,7 @@ class VideoIo(GoofyIo):
                 f"corrupt receive: index too far ahead "
                 f"({packet_idx} > {self._in_valid_packet_idx})"
             )
-            self.n_corrupt_receives_incr()
+            self.n_corrupt_receives_increment()
             return
         elif not checksum_verified:
             # data checksum couldn't be verified so there must be errors in the
@@ -1035,23 +1065,23 @@ class VideoIo(GoofyIo):
             self._log.debug(
                 "corrupt receive: data checksum couldn't be verified"
             )
-            self.n_corrupt_receives_incr()
+            self.n_corrupt_receives_increment()
             return
 
-        # finally! the header is correct, the index is correct, and the data is
-        # correct, so we can add it to the input buffer at last.
+        # at last! the header is correct, the index is correct, and the data is
+        # correct, so we can add it to the input buffer.
         force_acquire(self._in_buf_lock)
         self._in_valid_packet_idx += 1
         self._in_buf += data
         self._in_buf_lock.release()
 
-        self.n_corrupt_receives_decr()
+        self.n_corrupt_receives_decrement()
 
     def _take_screenshot(self) -> np.ndarray:
         screenshot = self._sct.grab(self._monitor)
         return np.array(screenshot)[:, :, :3][:, :, ::-1]  # BGRA → RGB
 
-    def n_corrupt_receives_incr(self):
+    def n_corrupt_receives_increment(self):
         self._n_corrupt_receives += 1
 
         n_corrupt_packets = int(
@@ -1061,7 +1091,7 @@ class VideoIo(GoofyIo):
             self._n_corrupt_receives = 0
             self._request_retransmission = True
 
-    def n_corrupt_receives_decr(self):
+    def n_corrupt_receives_decrement(self):
         self._n_corrupt_receives = max(
             0,
             self._n_corrupt_receives - 1
@@ -1110,7 +1140,7 @@ def generate_qr(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
         box_size=12,
-        border=0,
+        border=0
     )
     qr.add_data(data)
     qr.make(fit=True)
