@@ -17,7 +17,7 @@ import zlib
 import gzip
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QLabel
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QMetaObject
 from PySide6.QtGui import QImage, QPixmap, QPainter, QBrush, QColor
 
 import mss
@@ -531,19 +531,28 @@ class VideoIo(GoofyIo):
         except BaseException as e:
             self._log.fatal(format_exception(e))
         finally:
-            self._stopping = True
-            try:
-                self._timer.stop()
-                self._window.destroy()
-                self._app.quit()
-            except:
-                pass
+            self.stop()
 
     def _update_image(self):
         if self._stopping:
-            self._timer.stop()
-            self._window.destroy()
-            self._app.quit()
+            try:
+                QMetaObject.invokeMethod(
+                    self._timer,
+                    "stop",
+                    Qt.ConnectionType.QueuedConnection
+                )
+                QMetaObject.invokeMethod(
+                    self._window,
+                    "destroy",
+                    Qt.ConnectionType.QueuedConnection
+                )
+                QMetaObject.invokeMethod(
+                    self._app,
+                    "quit",
+                    Qt.ConnectionType.QueuedConnection
+                )
+            except Exception:
+                pass
             return
 
         if not self._started:
@@ -689,7 +698,7 @@ class VideoIo(GoofyIo):
             self._set_image(self._out_pixels, False, False)
         except BaseException as e:
             self._log.fatal(format_exception(e))
-            self._stopping = True
+            self.stop()
 
     def _set_image(
         self,
@@ -783,12 +792,16 @@ class VideoIo(GoofyIo):
                     interval = \
                         1. / self._peer_format.rate / self._screenshot_speed
                 else:
-                    interval = .1
+                    interval = .02
                 time.sleep(max(0., interval - elapsed))
         except BaseException as e:
             self._log.fatal(format_exception(e))
         finally:
-            self._stopping = True
+            try:
+                self._sct.close()
+            except Exception:
+                pass
+            self.stop()
 
     def _read_screen(self):
         if self._handshake_stage == HandshakeStage.LookingForPeerQr:
@@ -898,8 +911,8 @@ class VideoIo(GoofyIo):
             br_x1 = int(min(img_w - .001, qr_aabb.bottom_right[0] + padding))
             br_y1 = int(min(img_h - .001, qr_aabb.bottom_right[1] + padding))
 
-            tl_window = img[tl_y0:tl_y1, tl_x0:tl_x1]
-            br_window = img[br_y0:br_y1, br_x0:br_x1]
+            tl_window = img[tl_y0:tl_y1, tl_x0:tl_x1].astype(np.float32) / 255.
+            br_window = img[br_y0:br_y1, br_x0:br_x1].astype(np.float32) / 255.
 
             tl_dot_aabb = find_colored_square_aabb(
                 tl_window,
@@ -911,15 +924,22 @@ class VideoIo(GoofyIo):
             )
 
             if tl_dot_aabb:
-                qr_aabb.top_left = (
+                refined_tl = (
                     tl_dot_aabb.top_left[0] + tl_x0,
                     tl_dot_aabb.top_left[1] + tl_y0
                 )
+            else:
+                refined_tl = qr_aabb.top_left
+
             if br_dot_aabb:
-                qr_aabb.bottom_right = (
+                refined_br = (
                     br_dot_aabb.bottom_right[0] + br_x0,
                     br_dot_aabb.bottom_right[1] + br_y0
                 )
+            else:
+                refined_br = qr_aabb.bottom_right
+
+            qr_aabb = Aabb(refined_tl, refined_br)
 
             # compute the bounding box of the peer's video feed
             if self._peer_format.width > self._peer_format.height:
@@ -1393,8 +1413,19 @@ def find_colored_square_aabb(
         an `Aabb` if the square was found, None if not.
     """
 
-    assert img.dtype in (np.float32, np.float64)
-    assert len(img.shape) == 3 and img.shape[2] == 3
+    if img.dtype not in (np.float32, np.float64):
+        raise ValueError(f"{img.dtype=} is not float32 or float64")
+    if color.dtype not in (np.float32, np.float64):
+        raise ValueError(f"{color.dtype=} is not float32 or float64")
+    if len(img.shape) != 3 or img.shape[2] != 3:
+        raise ValueError(
+            f"{img.shape=} must be 3D and the third axis must have a size of 3 "
+            f"(RGB)"
+        )
+    if color.shape != (3,):
+        raise ValueError(
+            f"{color.shape=} must be (3,)"
+        )
 
     euclidean_distances = np.linalg.norm(img - color, axis=2)
     mask = euclidean_distances < tolerance

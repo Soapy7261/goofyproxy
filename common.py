@@ -71,7 +71,10 @@ class Formatter(logging.Formatter):
         message = super().format(record)
 
         if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
-            LOG_CONFIG["file"].write(message + "\n")
+            try:
+                LOG_CONFIG["file"].write(message + "\n")
+            except:
+                pass
 
         # terminal colors
         if LOG_CONFIG["colorize"]:
