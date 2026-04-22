@@ -54,7 +54,7 @@ def run(args: argparse.Namespace):
             msg = gio.receive(msg_len).decode()
             print(f"<<< {msg}")
     elif args.mode == "server":
-        GoofyServer(gio)
+        GoofyServer(gio, send_interval=.04)
         gio.stop()
     elif args.mode == "client":
         if not args.port:
@@ -65,7 +65,9 @@ def run(args: argparse.Namespace):
             gio,
             host="0.0.0.0",
             port=args.port,
-            buf_size=args.bufsize
+            buf_size=args.bufsize,
+            poll_interval=.04,
+            send_interval=.04
         )
         gio.stop()
     else:
