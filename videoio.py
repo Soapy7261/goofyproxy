@@ -522,6 +522,7 @@ class VideoIo(GoofyIo):
                 self.out_format.height / self._window.devicePixelRatio()
             )
             self._window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+            self._window.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint)
 
             # show warning for non-integer display scaling
             pix_ratio = self._window.devicePixelRatio()
