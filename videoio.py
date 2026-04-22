@@ -17,7 +17,7 @@ import zlib
 import gzip
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QLabel
-from PySide6.QtCore import QTimer, Qt, QMetaObject
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap, QPainter, QBrush, QColor
 
 import mss
@@ -47,6 +47,9 @@ QR_BORDER_FACTOR = .15
 
 HANDSHAKE_CORNER_DOT_COLOR = np.asarray([1, 0, 0], dtype=np.float32)
 HANDSHAKE_CORNER_DOT_SIZE = 5
+
+# wait a little after handshake so the other side can see our acknowledgement
+HANDSHAKE_FINISH_DELAY = 1.
 
 
 """
@@ -357,12 +360,14 @@ class VideoIo(GoofyIo):
     _window: QMainWindow
     _label: QLabel
     _timer: QTimer
+    _stop_signal: Signal | None = None
 
     _sct: MSSBase | None = None
     _monitor: Monitor | None = None
 
     _sender_id: str = ""
     _handshake_stage = HandshakeStage.ShowingQr
+    _handshake_done_time: float = 0.
 
     _peer_sender_id: str | None = None
     _peer_format: Format | None = None
@@ -457,6 +462,10 @@ class VideoIo(GoofyIo):
 
     def stop(self):
         self._stopping = True
+        try:
+            self._stop_signal.emit()
+        except Exception:
+            pass
 
     def get_monitors() -> list[Monitor]:
         sct = mss.mss()
@@ -524,8 +533,13 @@ class VideoIo(GoofyIo):
 
             self._timer = QTimer()
             self._timer.timeout.connect(self._update_image)
-            self._timer.start(1000. / self.out_format.rate)
 
+            self._stop_signal = Signal()
+            self._stop_signal.connect(self._timer.stop)
+            self._stop_signal.connect(self._window.destroy)
+            self._stop_signal.connect(self._app.quit)
+
+            self._timer.start(1000. / self.out_format.rate)
             self._window.show()
             self._app.exec()
         except BaseException as e:
@@ -534,28 +548,7 @@ class VideoIo(GoofyIo):
             self.stop()
 
     def _update_image(self):
-        if self._stopping:
-            try:
-                QMetaObject.invokeMethod(
-                    self._timer,
-                    "stop",
-                    Qt.ConnectionType.QueuedConnection
-                )
-                QMetaObject.invokeMethod(
-                    self._window,
-                    "destroy",
-                    Qt.ConnectionType.QueuedConnection
-                )
-                QMetaObject.invokeMethod(
-                    self._app,
-                    "quit",
-                    Qt.ConnectionType.QueuedConnection
-                )
-            except Exception:
-                pass
-            return
-
-        if not self._started:
+        if not self._started or self._stopping:
             return
 
         try:
@@ -601,6 +594,11 @@ class VideoIo(GoofyIo):
 
             if self._handshake_stage != HandshakeStage.Done:
                 raise ValueError("unknown handshake stage")
+
+            # wait a little after handshake so the other side can see our
+            # acknowledgement.
+            if time.time() - self._handshake_done_time < HANDSHAKE_FINISH_DELAY:
+                return
 
             force_acquire(self._out_buf_lock)
 
@@ -1017,6 +1015,7 @@ class VideoIo(GoofyIo):
 
             self._log.info("VideoIo handshake was successful")
             self._handshake_stage = HandshakeStage.Done
+            self._handshake_done_time = time.time()
         elif self._handshake_stage != HandshakeStage.Done:
             return
 
