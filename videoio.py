@@ -295,6 +295,7 @@ class Window(QMainWindow):
     def __init__(
         self,
         title: str,
+        position: tuple[int, int] | None,
         format: Format,
         log: logging.Logger,
         double_click_callback: Callable[[], None],
@@ -305,11 +306,16 @@ class Window(QMainWindow):
         self.double_click_callback = double_click_callback
 
         self.setWindowTitle(title)
+
         pix_ratio = self.devicePixelRatio()
         self.setFixedSize(
             format.width / pix_ratio,
             format.height / pix_ratio
         )
+
+        if position is not None:
+            self.move(*position)
+
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint)
@@ -339,7 +345,7 @@ class Window(QMainWindow):
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setTextFormat(Qt.TextFormat.MarkdownText)
         self.label.setText(
-            f"## {title}\n\n"
+            f"### {title}\n\\\n"
             "**drag:** move around\n\n"
             "**double click:** start\n\n"
             "**right click:** minimize"
@@ -455,6 +461,9 @@ class VideoIo(GoofyIo):
             how much to wait (in seconds) after each handshake stage so the
             other side has time to see our responses.
 
+        window_position (tuple[int, int] | None):
+            initial window position
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -497,6 +506,7 @@ class VideoIo(GoofyIo):
     _app: QApplication
     _window: Window
     _timer: QTimer
+    _window_position: tuple[int, int] | None = None
 
     _sct: MSSBase | None = None
     _monitor: Monitor | None = None
@@ -524,6 +534,7 @@ class VideoIo(GoofyIo):
         screenshot_speed: float = 2.,
         corrupt_packet_threshold: int = 2,
         handshake_interval: float = 2.,
+        window_position: tuple[int, int] | None = None,
         log_level: int | None = None
     ):
         self._log = make_logger(f"VideoIo", log_level)
@@ -539,6 +550,7 @@ class VideoIo(GoofyIo):
         self._corrupt_packet_threshold = corrupt_packet_threshold
 
         self._handshake_interval = handshake_interval
+        self._window_position = window_position
 
         self._log.info(
             f"output format: {self.out_format} "
@@ -652,6 +664,7 @@ class VideoIo(GoofyIo):
             self._app = QApplication(sys.argv)
             self._window = Window(
                 f"VideoIo - {self._sender_id}",
+                self._window_position,
                 self.out_format,
                 self._log,
                 lambda: self.start()

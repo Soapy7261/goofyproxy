@@ -30,6 +30,15 @@ def run(args: argparse.Namespace):
             print("(no monitors found)")
         return
 
+    window_position = None
+    if args.position:
+        try:
+            x, y = args.position.split(",")
+            window_position = (int(x), int(y))
+        except Exception:
+            print(f"invalid position \"{args.position}\"")
+            return
+
     gio = VideoIo(
         out_format=args.format,
         in_monitor_idx=args.monitor,
@@ -37,7 +46,8 @@ def run(args: argparse.Namespace):
         peer_id=args.peer_id,
         screenshot_speed=args.screenshot_speed,
         corrupt_packet_threshold=args.corrupt_packet_threshold,
-        handshake_interval=args.handshake_interval
+        handshake_interval=args.handshake_interval,
+        window_position=window_position
     )
 
     if args.start_immediately:
@@ -201,6 +211,13 @@ def main():
         default=default,
         help=f"[{default=}] how much to wait (in seconds) after each handshake "
         "stage so the other side has time to see our responses."
+    )
+    parser.add_argument(
+        "-W",
+        "--position",
+        type=str,
+        help="optional initial window position represented as \"x,y\" "
+        "(example: 25,100)"
     )
     parser.add_argument(
         "-p",
