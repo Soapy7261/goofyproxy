@@ -710,8 +710,8 @@ class VideoIo(GoofyIo):
             # show hello QR code
             if self._handshake_stage == HandshakeStage.ShowingHello:
                 qr = generate_qr(
-                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
-                    f"#{self.out_format}#hello"
+                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}#hello"
+                    f"#{self.out_format}"
                 )
 
                 qr_size = int(
@@ -767,8 +767,8 @@ class VideoIo(GoofyIo):
 
                 # QR code
                 qr = generate_qr(
-                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
-                    f"#{self.out_format}#ack#{self._peer_sender_id}",
+                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}#ack"
+                    f"#{self._peer_sender_id}",
                     border_factor=.1
                 )
                 if self.out_format.width >= self.out_format.height:
@@ -1054,27 +1054,35 @@ class VideoIo(GoofyIo):
                 # skip invalid format
 
                 parts = qr.text.split("#")
-                if len(parts) < 4:
+                if len(parts) < 3:
                     continue
 
-                sender_version, sender_id, sender_format_str, cmd = parts[:4]
-                parts = parts[4:]
+                sender_version, sender_id, cmd = parts[:3]
+                parts = parts[3:]
+
+                if sender_id in self._ignored_peers:
+                    continue
 
                 version_prefix = "VideoIo-"
                 if not sender_version.startswith(version_prefix):
                     continue
+
                 try:
                     sender_version = int(sender_version[len(version_prefix):])
                 except Exception:
+                    self._ignored_peers.append(sender_id)
+                    self._log.warning(
+                        f"ignoring peer \"{sender_id}\" with non-integer "
+                        f"version \"{sender_version}\"."
+                    )
                     continue
                 if sender_version < VIDEOIO_MIN_PEER_VERSION:
-                    if sender_id not in self._ignored_peers:
-                        self._ignored_peers.append(sender_id)
-                        self._log.warning(
-                            f"ignoring peer \"{sender_id}\" with version "
-                            f"{sender_version} which is lower than the minimum "
-                            f"supported ({VIDEOIO_MIN_PEER_VERSION})."
-                        )
+                    self._ignored_peers.append(sender_id)
+                    self._log.warning(
+                        f"ignoring peer \"{sender_id}\" with version "
+                        f"{sender_version} which is lower than the minimum "
+                        f"supported ({VIDEOIO_MIN_PEER_VERSION})."
+                    )
                     continue
 
                 # skip our own QR
@@ -1087,14 +1095,20 @@ class VideoIo(GoofyIo):
                         and sender_id != self._peer_sender_id:
                     continue
 
-                # skip if the sender's format is invalid
+                # look for hello
+                if cmd != "hello" or len(parts) < 1:
+                    continue
+
+                # verify the sender's format
+                sender_format_str = parts[0]
                 try:
                     sender_format = Format.create(sender_format_str)
                 except Exception:
-                    continue
-
-                # look for hello
-                if cmd != "hello":
+                    self._ignored_peers.append(sender_id)
+                    self._log.warning(
+                        f"ignoring peer \"{sender_id}\" with invalid format "
+                        f"\"{sender_format_str}\"."
+                    )
                     continue
 
                 senders.append((qr.aabb, sender_id, sender_format))
@@ -1217,11 +1231,11 @@ class VideoIo(GoofyIo):
             found_ack = False
             for qr in qr_codes:
                 parts = qr.text.split("#")
-                if len(parts) < 5:
+                if len(parts) < 4:
                     continue
 
-                _, sender_id, _, cmd, acked_who = parts[:5]
-                parts = parts[5:]
+                _, sender_id, cmd, acked_who = parts[:4]
+                parts = parts[4:]
 
                 if sender_id != self._peer_sender_id:
                     continue
@@ -1231,8 +1245,8 @@ class VideoIo(GoofyIo):
 
                 if acked_who != self._sender_id:
                     raise Exception(
-                        f"peer is acknowledging another peer with ID "
-                        f"\"{acked_who}\"."
+                        f"peer \"{self._peer_sender_id}\" is acknowledging "
+                        f"another peer with ID \"{acked_who}\"."
                     )
 
                 found_ack = True
