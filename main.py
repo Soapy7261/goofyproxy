@@ -37,13 +37,20 @@ def run(args: argparse.Namespace):
         peer_id=args.peer_id,
         screenshot_speed=args.screenshot_speed,
         corrupt_packet_threshold=args.corrupt_packet_threshold,
-        handshake_finish_delay=args.handshake_finish_delay
+        handshake_interval=args.handshake_interval
     )
 
-    if not args.start_immediately:
-        print("hit [Enter] to start the VideoIo handshake process...")
-        input()
-    gio.start()
+    if args.start_immediately:
+        gio.start()
+    else:
+        print(
+            "double click on the window to start the VideoIo handshake "
+            "process..."
+        )
+    while not gio.started():
+        time.sleep(.05)
+    if not gio.running():
+        return
 
     if args.mode == "chat":
         # sending
@@ -157,8 +164,7 @@ def main():
         "--start-immediately",
         action="store_true",
         help="start the VideoIo handshake process as soon as the window opens. "
-        "if not enabled, the program will wait for the user to hit [Enter] "
-        "before it starts updating the window."
+        "if not enabled, will wait for a double click."
     )
     default = 2.
     parser.add_argument(
@@ -189,13 +195,12 @@ def main():
     )
     default = 2.
     parser.add_argument(
-        "-W",
-        "--handshake-finish-delay",
+        "-w",
+        "--handshake-interval",
         type=float,
         default=default,
-        help=f"[{default=}] how much to wait (in seconds) after VideoIo "
-        "handshake before starting to send packets (so the other side can see "
-        "our acknowledgement)."
+        help=f"[{default=}] how much to wait (in seconds) after each handshake "
+        "stage so the other side has time to see our responses."
     )
     parser.add_argument(
         "-p",

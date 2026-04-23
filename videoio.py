@@ -10,15 +10,17 @@ import getpass
 import random
 from enum import IntEnum
 from typing import NamedTuple
+from collections.abc import Callable
 
 import numpy as np
 from scipy.spatial.distance import cdist
 import zlib
 import gzip
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QLabel
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap, QPainter, QBrush, QColor
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, \
+    QLabel
+from PySide6.QtCore import Qt, QTimer, QPoint, QSize
+from PySide6.QtGui import QImage, QPixmap, QMouseEvent
 
 import mss
 from mss.base import MSSBase
@@ -284,6 +286,124 @@ class HandshakeStage(IntEnum):
     Done = 4
 
 
+class Window(QMainWindow):
+    label: QLabel
+    dragging: bool = False
+    drag_position: QPoint
+    double_click_callback: Callable[[], None]
+
+    def __init__(
+        self,
+        title: str,
+        format: Format,
+        log: logging.Logger,
+        double_click_callback: Callable[[], None],
+        parent=None
+    ):
+        super().__init__(parent)
+
+        self.double_click_callback = double_click_callback
+
+        self.setWindowTitle(title)
+        pix_ratio = self.devicePixelRatio()
+        self.setFixedSize(
+            format.width / pix_ratio,
+            format.height / pix_ratio
+        )
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint)
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #212121;
+                border-radius: 0;
+                border: 1px solid #505050;
+            }
+        """)
+
+        # show warning for non-integer display scaling
+        if abs(pix_ratio - round(pix_ratio)) > .0001:
+            log.warning(
+                f"non-integer display scaling detected (x{pix_ratio}). "
+                "precision may be reduced."
+            )
+
+        # for dragging
+        self.setMouseTracking(True)
+        self.dragging = False
+        self.drag_position = QPoint()
+
+        # label
+        self.label = QLabel()
+        self.label.setScaledContents(False)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setTextFormat(Qt.TextFormat.MarkdownText)
+        self.label.setText(
+            f"## {title}\n\n"
+            "**drag:** move around\n\n"
+            "**double click:** start\n\n"
+            "**right click:** minimize"
+        )
+        self.label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                padding: 0;
+                margin: 0;
+                color: #dcdcdc;
+            }
+        """)
+        self.label.setMargin(0)
+        self.label.setContentsMargins(0, 0, 0, 0)
+
+        # create central widget and layout
+
+        central_widget = QWidget()
+        central_widget.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.setCentralWidget(central_widget)
+
+        layout = QVBoxLayout(central_widget)
+        layout.addWidget(self.label)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = True
+            self.drag_position = (
+                event.globalPosition().toPoint()
+                - self.frameGeometry().topLeft()
+            )
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self.dragging and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = False
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_click_callback()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        self.showMinimized()
+        event.accept()
+
+
 class VideoIo(GoofyIo):
     """
     a `GoofyIo` that transfers data through video calls. data is sent by showing
@@ -331,9 +451,9 @@ class VideoIo(GoofyIo):
             ahead or checksum unverified), we'll ask the other side to start
             retransmitting from the last packet index we properly received.
 
-        handshake_finish_delay (float):
-            how much to wait (in seconds) after handshake before starting to
-            send packets (so the other side can see our acknowledgement).
+        handshake_interval (float):
+            how much to wait (in seconds) after each handshake stage so the
+            other side has time to see our responses.
 
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
@@ -375,8 +495,7 @@ class VideoIo(GoofyIo):
     _receive_thread: threading.Thread
 
     _app: QApplication
-    _window: QMainWindow
-    _label: QLabel
+    _window: Window
     _timer: QTimer
 
     _sct: MSSBase | None = None
@@ -384,7 +503,6 @@ class VideoIo(GoofyIo):
 
     _sender_id: str = ""
     _handshake_stage = HandshakeStage.ShowingQr
-    _handshake_done_time: float = 0.
 
     _peer_sender_id: str | None = None
     _peer_format: Format | None = None
@@ -395,7 +513,7 @@ class VideoIo(GoofyIo):
     _screenshot_speed: float
     _corrupt_packet_threshold: int
 
-    _handshake_finish_delay: float
+    _handshake_interval: float
 
     def __init__(
         self,
@@ -405,7 +523,7 @@ class VideoIo(GoofyIo):
         peer_id: str | None = None,
         screenshot_speed: float = 2.,
         corrupt_packet_threshold: int = 2,
-        handshake_finish_delay: float = 2.,
+        handshake_interval: float = 2.,
         log_level: int | None = None
     ):
         self._log = make_logger(f"VideoIo", log_level)
@@ -420,7 +538,7 @@ class VideoIo(GoofyIo):
         self._screenshot_speed = screenshot_speed
         self._corrupt_packet_threshold = corrupt_packet_threshold
 
-        self._handshake_finish_delay = handshake_finish_delay
+        self._handshake_interval = handshake_interval
 
         self._log.info(
             f"output format: {self.out_format} "
@@ -480,6 +598,9 @@ class VideoIo(GoofyIo):
             raise RuntimeError("can't continue running after stopping")
         self._started = True
 
+    def started(self) -> bool:
+        return self._started
+
     def running(self) -> bool:
         return self._started and not self._stopping
 
@@ -527,34 +648,21 @@ class VideoIo(GoofyIo):
 
     def _send_thread_run(self):
         try:
+            # create Qt app and window
             self._app = QApplication(sys.argv)
-
-            self._window = QMainWindow()
-            self._window.setWindowTitle(f"VideoIo - {self._sender_id}")
-            pix_ratio = self._window.devicePixelRatio()
-            self._window.setFixedSize(
-                self.out_format.width / pix_ratio,
-                self.out_format.height / pix_ratio
+            self._window = Window(
+                f"VideoIo - {self._sender_id}",
+                self.out_format,
+                self._log,
+                lambda: self.start()
             )
-            self._window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
-            self._window.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint)
 
-            # show warning for non-integer display scaling
-            if abs(pix_ratio - round(pix_ratio)) > .0001:
-                self._log.warning(
-                    f"non-integer display scaling detected (x{pix_ratio}). "
-                    "precision may be reduced."
-                )
-
-            self._label = QLabel()
-            self._label.setScaledContents(False)
-            self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._window.setCentralWidget(self._label)
-
+            # timer for updating the image
             self._timer = QTimer(timerType=Qt.TimerType.PreciseTimer)
             self._timer.timeout.connect(self._update_image)
             self._timer.start(1000. / self.out_format.rate)
 
+            # start the app
             self._window.show()
             self._app.exec()
         except BaseException as e:
@@ -583,24 +691,28 @@ class VideoIo(GoofyIo):
             return
 
         try:
+            if self._window.label.text():
+                self._window.label.setText("")
+
             # show hello QR code
             if self._handshake_stage == HandshakeStage.ShowingQr:
-                img = generate_qr(
+                qr = generate_qr(
                     f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
                     f"#{self.out_format}#hello"
                 )
 
-                pix_ratio = self._window.devicePixelRatio()
-                window_size = self._window.size()
-                window_size = min(window_size.width(), window_size.height())
-                img = resize_image_u8(
-                    img,
-                    (int(window_size * pix_ratio), int(window_size * pix_ratio))
+                window_size_min = min(
+                    self.out_format.width,
+                    self.out_format.height
+                )
+                qr = resize_image_u8(
+                    qr,
+                    (int(window_size_min), int(window_size_min))
                 )
 
-                img = draw_corner_squares(img)
+                qr = draw_corner_squares(qr)
 
-                self._set_image(img)
+                self._set_image(qr)
 
                 self._log.info(
                     "looking for a peer" if self._peer_sender_id is None
@@ -615,22 +727,21 @@ class VideoIo(GoofyIo):
 
             # show acknowledgement QR code
             if self._handshake_stage == HandshakeStage.ShowingAck:
-                img = generate_qr(
+                qr = generate_qr(
                     f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
                     f"#{self.out_format}#ack#{self._peer_sender_id}"
                 )
 
-                pix_ratio = self._window.devicePixelRatio()
-                window_size = self._window.size()
-                window_size = min(window_size.width(), window_size.height())
-                img = resize_image_u8(
-                    img,
-                    (int(window_size * pix_ratio), int(window_size * pix_ratio))
+                window_size_min = min(
+                    self.out_format.width,
+                    self.out_format.height
+                )
+                qr = resize_image_u8(
+                    qr,
+                    (int(window_size_min), int(window_size_min))
                 )
 
-                img = draw_corner_squares(img)
-
-                self._set_image(img)
+                self._set_image(qr)
 
                 self._log.info(
                     "waiting for the peer's acknowledgement QR code")
@@ -643,12 +754,6 @@ class VideoIo(GoofyIo):
 
             if self._handshake_stage != HandshakeStage.Done:
                 raise ValueError("unknown handshake stage")
-
-            # wait a little after handshake so the other side can see our
-            # acknowledgement.
-            if time.time() - self._handshake_done_time \
-                    < self._handshake_finish_delay:
-                return
 
             force_acquire(self._out_buf_lock)
 
@@ -784,7 +889,7 @@ class VideoIo(GoofyIo):
 
         pixmap = QPixmap.fromImage(q_image)
         scaled_pixmap = pixmap.scaled(
-            self._window.size(),
+            QSize(self.out_format.width, self.out_format.height),
 
             Qt.AspectRatioMode.KeepAspectRatio if keep_aspect_ratio
             else Qt.AspectRatioMode.IgnoreAspectRatio,
@@ -793,7 +898,7 @@ class VideoIo(GoofyIo):
             else Qt.TransformationMode.FastTransformation
         )
 
-        self._label.setPixmap(scaled_pixmap)
+        self._window.label.setPixmap(scaled_pixmap)
 
     def _receive_thread_run(self):
         try:
@@ -819,7 +924,7 @@ class VideoIo(GoofyIo):
                     interval = \
                         1. / self._peer_format.rate / self._screenshot_speed
                 else:
-                    interval = .02
+                    interval = min(.05, self._handshake_interval * .5)
                 time.sleep(max(0., interval - elapsed))
         except BaseException as e:
             self._log.fatal(format_exception(e))
@@ -879,21 +984,8 @@ class VideoIo(GoofyIo):
                 except Exception:
                     continue
 
-                # look for hello or ack
-                if len(parts) == 1:
-                    if cmd != "ack":
-                        continue
-                    sender_acked_who = parts[0]
-                    if sender_acked_who != self._sender_id:
-                        # the sender is acknowledging someone else, not us
-                        if self._peer_sender_id is not None:
-                            raise Exception(
-                                f"requested peer with ID "
-                                f"\"{self._peer_sender_id}\" is acknowledging "
-                                f"another peer with ID \"{sender_acked_who}\"."
-                            )
-                        continue
-                elif cmd != "hello" or len(parts) > 1:
+                # look for hello
+                if cmd != "hello":
                     continue
 
                 senders.append((qr.aabb, sender_id, sender_format))
@@ -1012,6 +1104,8 @@ class VideoIo(GoofyIo):
                 "peer's video feed does not move around on the screen."
             )
 
+            # wait a little so the other side has time to see our hello
+            time.sleep(self._handshake_interval)
             self._handshake_stage = HandshakeStage.ShowingAck
         elif self._handshake_stage == HandshakeStage.WaitingForAck:
             qr_codes = find_qr_codes(self._take_screenshot())
@@ -1043,8 +1137,11 @@ class VideoIo(GoofyIo):
                 return
 
             self._log.info("VideoIo handshake was successful")
+
+            # wait a little after handshake so the other side can see our
+            # acknowledgement before we start sending packets.
+            time.sleep(self._handshake_interval)
             self._handshake_stage = HandshakeStage.Done
-            self._handshake_done_time = time.time()
         elif self._handshake_stage != HandshakeStage.Done:
             return
 
