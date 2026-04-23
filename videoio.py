@@ -47,7 +47,7 @@ QR_BORDER_FACTOR = .15
 
 # we put tiny squares at the top left and bottom right corners of the QR codes
 # so the other side can detect our bounding box accurately.
-HANDSHAKE_CORNER_DOT_COLOR = np.asarray([1, 0, 0], dtype=np.float32)
+HANDSHAKE_CORNER_DOT_COLOR = np.asarray([255, 0, 0], dtype=np.uint8)
 HANDSHAKE_CORNER_DOT_SIZE = 8
 
 
@@ -585,13 +585,22 @@ class VideoIo(GoofyIo):
         try:
             # show hello QR code
             if self._handshake_stage == HandshakeStage.ShowingQr:
-                self._set_image(
-                    generate_qr(
-                        f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
-                        f"#{self.out_format}#hello"
-                    ),
-                    put_corner_dots_for_handshake=True
+                img = generate_qr(
+                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
+                    f"#{self.out_format}#hello"
                 )
+
+                pix_ratio = self._window.devicePixelRatio()
+                window_size = self._window.size()
+                window_size = min(window_size.width(), window_size.height())
+                img = resize_image_u8(
+                    img,
+                    (int(window_size * pix_ratio), int(window_size * pix_ratio))
+                )
+
+                img = draw_corner_squares(img)
+
+                self._set_image(img)
 
                 self._log.info(
                     "looking for a peer" if self._peer_sender_id is None
@@ -606,13 +615,22 @@ class VideoIo(GoofyIo):
 
             # show acknowledgement QR code
             if self._handshake_stage == HandshakeStage.ShowingAck:
-                self._set_image(
-                    generate_qr(
-                        f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
-                        f"#{self.out_format}#ack#{self._peer_sender_id}"
-                    ),
-                    put_corner_dots_for_handshake=True
+                img = generate_qr(
+                    f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
+                    f"#{self.out_format}#ack#{self._peer_sender_id}"
                 )
+
+                pix_ratio = self._window.devicePixelRatio()
+                window_size = self._window.size()
+                window_size = min(window_size.width(), window_size.height())
+                img = resize_image_u8(
+                    img,
+                    (int(window_size * pix_ratio), int(window_size * pix_ratio))
+                )
+
+                img = draw_corner_squares(img)
+
+                self._set_image(img)
 
                 self._log.info(
                     "waiting for the peer's acknowledgement QR code")
@@ -734,8 +752,7 @@ class VideoIo(GoofyIo):
         self,
         img: np.ndarray,
         keep_aspect_ratio: bool = True,
-        smooth: bool = True,
-        put_corner_dots_for_handshake: bool = False
+        smooth: bool = True
     ):
         if img.dtype in (np.float32, np.float64):
             img = np.round(np.clip(img, 0., 1.) * 255.)
@@ -754,8 +771,8 @@ class VideoIo(GoofyIo):
                 fmt = QImage.Format.Format_RGBA8888
             else:
                 raise ValueError(
-                    "the third axis of an image must have a size of 4 (RGBA) "
-                    "or 3 (RGB) or 1 (grayscale)."
+                    "the third axis of an image must have a size of 4 (RGBA), "
+                    "3 (RGB), or 1 (grayscale)."
                 )
         elif len(img.shape) == 2:
             bytes_per_line = w
@@ -775,26 +792,6 @@ class VideoIo(GoofyIo):
             Qt.TransformationMode.SmoothTransformation if smooth
             else Qt.TransformationMode.FastTransformation
         )
-
-        if put_corner_dots_for_handshake:
-            painter = QPainter(scaled_pixmap)
-            painter.setPen(Qt.PenStyle.NoPen)
-            color = np.round(HANDSHAKE_CORNER_DOT_COLOR *
-                             255.).astype(np.uint8)
-            painter.setBrush(QBrush(
-                QColor(*color),
-                Qt.BrushStyle.SolidPattern
-            ))
-            painter.drawRect(
-                0, 0, HANDSHAKE_CORNER_DOT_SIZE, HANDSHAKE_CORNER_DOT_SIZE
-            )
-            painter.drawRect(
-                scaled_pixmap.width() - HANDSHAKE_CORNER_DOT_SIZE,
-                scaled_pixmap.height() - HANDSHAKE_CORNER_DOT_SIZE,
-                HANDSHAKE_CORNER_DOT_SIZE,
-                HANDSHAKE_CORNER_DOT_SIZE
-            )
-            painter.end()
 
         self._label.setPixmap(scaled_pixmap)
 
@@ -946,11 +943,11 @@ class VideoIo(GoofyIo):
 
             tl_dot_aabb = find_colored_square_aabb(
                 tl_window,
-                HANDSHAKE_CORNER_DOT_COLOR
+                HANDSHAKE_CORNER_DOT_COLOR.astype(np.float32) / 255.
             )
             br_dot_aabb = find_colored_square_aabb(
                 br_window,
-                HANDSHAKE_CORNER_DOT_COLOR
+                HANDSHAKE_CORNER_DOT_COLOR.astype(np.float32) / 255.
             )
 
             if tl_dot_aabb:
@@ -1464,3 +1461,19 @@ def resize_image_u8(
     img_pil = Image.fromarray(img)
     img_pil = img_pil.resize(new_size, interpolation)
     return np.array(img_pil)
+
+
+def draw_corner_squares(img: np.ndarray[np.uint8]) -> np.ndarray[np.uint8]:
+    assert img.dtype == np.uint8, f"{img.dtype=} is not uint8"
+
+    if len(img.shape) == 2:
+        img = np.dstack([img] * 3)
+
+    img[:HANDSHAKE_CORNER_DOT_SIZE, :HANDSHAKE_CORNER_DOT_SIZE] = \
+        img[:HANDSHAKE_CORNER_DOT_SIZE, :HANDSHAKE_CORNER_DOT_SIZE] \
+        * 0 + HANDSHAKE_CORNER_DOT_COLOR
+    img[-HANDSHAKE_CORNER_DOT_SIZE:, -HANDSHAKE_CORNER_DOT_SIZE:] = \
+        img[-HANDSHAKE_CORNER_DOT_SIZE:, -HANDSHAKE_CORNER_DOT_SIZE:] \
+        * 0 + HANDSHAKE_CORNER_DOT_COLOR
+
+    return img
