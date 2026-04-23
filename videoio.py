@@ -45,6 +45,8 @@ OUT_PACKETS_MIN_COUNT = 16  # must be bigger than 1
 
 QR_BORDER_FACTOR = .15
 
+# we put tiny squares at the top left and bottom right corners of the QR codes
+# so the other side can detect our bounding box accurately.
 HANDSHAKE_CORNER_DOT_COLOR = np.asarray([1, 0, 0], dtype=np.float32)
 HANDSHAKE_CORNER_DOT_SIZE = 8
 
