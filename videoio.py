@@ -279,8 +279,8 @@ COLOR_PALETTES = {
 
 
 class HandshakeStage(IntEnum):
-    ShowingQr = 0
-    LookingForPeerQr = 1
+    ShowingHello = 0
+    LookingForPeerHello = 1
     ShowingAck = 2
     WaitingForAck = 3
     Done = 4
@@ -512,7 +512,7 @@ class VideoIo(GoofyIo):
     _monitor: Monitor | None = None
 
     _sender_id: str = ""
-    _handshake_stage = HandshakeStage.ShowingQr
+    _handshake_stage = HandshakeStage.ShowingHello
 
     _peer_sender_id: str | None = None
     _peer_format: Format | None = None
@@ -708,20 +708,16 @@ class VideoIo(GoofyIo):
                 self._window.label.setText("")
 
             # show hello QR code
-            if self._handshake_stage == HandshakeStage.ShowingQr:
+            if self._handshake_stage == HandshakeStage.ShowingHello:
                 qr = generate_qr(
                     f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
                     f"#{self.out_format}#hello"
                 )
 
-                window_size_min = min(
-                    self.out_format.width,
-                    self.out_format.height
+                qr_size = int(
+                    min(self.out_format.width, self.out_format.height)
                 )
-                qr = resize_image_u8(
-                    qr,
-                    (int(window_size_min), int(window_size_min))
-                )
+                qr = resize_image_u8(qr, (qr_size, qr_size))
 
                 qr = draw_corner_squares(qr)
 
@@ -731,33 +727,89 @@ class VideoIo(GoofyIo):
                     "looking for a peer" if self._peer_sender_id is None
                     else f"looking for peer \"{self._peer_sender_id}\""
                 )
-                self._handshake_stage = HandshakeStage.LookingForPeerQr
+                self._handshake_stage = HandshakeStage.LookingForPeerHello
                 return
 
-            # wait for the receive thread to detect the peer's QR code
-            if self._handshake_stage == HandshakeStage.LookingForPeerQr:
+            # wait for the receive thread to detect the peer's hello QR code
+            if self._handshake_stage == HandshakeStage.LookingForPeerHello:
                 return
 
-            # show acknowledgement QR code
+            # show acknowledgement QR code along with our color palette
             if self._handshake_stage == HandshakeStage.ShowingAck:
+                # color palette grid
+
+                palette_w, palette_h, palette_resx, palette_resy = \
+                    self._compute_palette_grid_size(self.out_format)
+
+                palette_grid = \
+                    self._out_palette.reshape(palette_resy, palette_resx, 3)
+
+                palette_grid = np.repeat(
+                    np.repeat(
+                        palette_grid,
+                        palette_h // palette_resy,
+                        axis=0
+                    ),
+                    palette_w // palette_resx,
+                    axis=1
+                )
+
+                if self.out_format.width >= self.out_format.height:
+                    palette_offs = (
+                        self.out_format.width - palette_w,
+                        0
+                    )
+                else:
+                    palette_offs = (
+                        0,
+                        self.out_format.height - palette_h
+                    )
+
+                # QR code
                 qr = generate_qr(
                     f"VideoIo-{VIDEOIO_VERSION}#{self._sender_id}"
-                    f"#{self.out_format}#ack#{self._peer_sender_id}"
+                    f"#{self.out_format}#ack#{self._peer_sender_id}",
+                    border_factor=.1
                 )
+                if self.out_format.width >= self.out_format.height:
+                    qr_size = int(min(
+                        self.out_format.width - palette_w,
+                        self.out_format.height
+                    ))
+                    qr_offs = (
+                        0,
+                        (self.out_format.height - qr_size) // 2
+                    )
+                else:
+                    qr_size = int(min(
+                        self.out_format.width,
+                        self.out_format.height - palette_h,
+                    ))
+                    qr_offs = (
+                        (self.out_format.width - qr_size) // 2,
+                        0
+                    )
+                qr = resize_image_u8(qr, (qr_size, qr_size))
 
-                window_size_min = min(
-                    self.out_format.width,
-                    self.out_format.height
-                )
-                qr = resize_image_u8(
-                    qr,
-                    (int(window_size_min), int(window_size_min))
-                )
+                # combine
+                img = np.ones(
+                    (self.out_format.height, self.out_format.width, 3),
+                    np.uint8
+                ) * 255
+                img[
+                    qr_offs[1]:qr_offs[1]+qr_size,
+                    qr_offs[0]:qr_offs[0]+qr_size
+                ] = qr
+                img[
+                    palette_offs[1]:palette_offs[1]+palette_h,
+                    palette_offs[0]:palette_offs[0]+palette_w
+                ] = palette_grid
 
-                self._set_image(qr)
+                self._set_image(img)
 
                 self._log.info(
-                    "waiting for the peer's acknowledgement QR code")
+                    "waiting for the peer's acknowledgement"
+                )
                 self._handshake_stage = HandshakeStage.WaitingForAck
                 return
 
@@ -913,6 +965,50 @@ class VideoIo(GoofyIo):
 
         self._window.label.setPixmap(scaled_pixmap)
 
+    def _compute_palette_grid_size(
+        self,
+        f: Format
+    ) -> tuple[int, int, int, int]:
+        if f.bits_per_cell == 1:
+            res_x, res_y = (1, 2)
+        elif f.bits_per_cell == 2:
+            res_x, res_y = (2, 2)
+        elif f.bits_per_cell == 3:
+            res_x, res_y = (2, 4)
+        elif f.bits_per_cell == 4:
+            res_x, res_y = (4, 4)
+        elif f.bits_per_cell == 5:
+            res_x, res_y = (4, 8)
+        elif f.bits_per_cell == 6:
+            res_x, res_y = (8, 8)
+        else:
+            raise ValueError(
+                f"unsupported bits_per_cell ({f.bits_per_cell}) for palette "
+                f"grid"
+            )
+
+        n_colors = 2 ** f.bits_per_cell
+        if res_x * res_y != n_colors:
+            raise ValueError(
+                f"the product of {res_x=} and {res_y=} is not {n_colors=}. the "
+                f"palette grid size calculation code has a bug."
+            )
+
+        if f.width >= f.height:
+            width = f.width // 2 // res_x * res_x
+            height = f.height // res_y * res_y
+        else:
+            width = f.width // res_x * res_x
+            height = f.height // 2 // res_y * res_y
+
+        if (width * height) < n_colors:
+            raise ValueError(
+                f"format {f} is too small to fit its color palette "
+                f"({2 ** f.bits_per_cell} colors) in acknowledgement."
+            )
+
+        return (width, height, res_x, res_y)
+
     def _receive_thread_run(self):
         try:
             self._sct = mss.mss()
@@ -949,7 +1045,7 @@ class VideoIo(GoofyIo):
             self.stop()
 
     def _read_screen(self):
-        if self._handshake_stage == HandshakeStage.LookingForPeerQr:
+        if self._handshake_stage == HandshakeStage.LookingForPeerHello:
             img = self._take_screenshot()
 
             qr_codes = find_qr_codes(img)
@@ -1074,7 +1170,7 @@ class VideoIo(GoofyIo):
             qr_aabb = Aabb(refined_tl, refined_br)
 
             # compute the bounding box of the peer's video feed
-            if self._peer_format.width > self._peer_format.height:
+            if self._peer_format.width >= self._peer_format.height:
                 center_x = (qr_aabb.top_left[0] + qr_aabb.bottom_right[0]) * .5
                 h = qr_aabb.bottom_right[1] - qr_aabb.top_left[1]
                 ratio = self._peer_format.width / self._peer_format.height
@@ -1102,10 +1198,6 @@ class VideoIo(GoofyIo):
                         center_y + w * ratio * .5
                     )
                 )
-
-            # peer's color palette
-            self._in_palette = COLOR_PALETTES[self._peer_format.bits_per_cell]
-            self._in_palette = self._in_palette.astype(np.float32) / 255.
 
             self._log.info(
                 f"found peer \"{self._peer_sender_id}\" with format "
@@ -1149,37 +1241,41 @@ class VideoIo(GoofyIo):
             if not found_ack:
                 return
 
+            # read the peer's color palette
+
+            palette_w, palette_h, palette_resx, palette_resy = \
+                self._compute_palette_grid_size(self._peer_format)
+
+            img = self._take_peer_screenshot_f32()
+            if self._peer_format.width >= self._peer_format.height:
+                img = img[:palette_h, -palette_w:]
+            else:
+                img = img[-palette_h:, :palette_w]
+
+            img = img.reshape(
+                palette_resy,
+                palette_h // palette_resy,
+                palette_resx,
+                palette_w // palette_resx,
+                3  # RGB
+            ).mean(axis=(1, 3))
+
+            n_colors = int(2 ** self._peer_format.bits_per_cell)
+            self._in_palette = img.reshape(n_colors, 3)
+
+            # handshake done :D
             self._log.info("VideoIo handshake was successful")
 
             # wait a little after handshake so the other side can see our
             # acknowledgement before we start sending packets.
             time.sleep(self._handshake_interval)
             self._handshake_stage = HandshakeStage.Done
-        elif self._handshake_stage != HandshakeStage.Done:
+
+        if self._handshake_stage != HandshakeStage.Done:
             return
 
-        # take a screenshot
-        img = self._take_screenshot()
-
-        # crop into peer AABB
-        x0 = int(self._peer_aabb.top_left[0])
-        y0 = int(self._peer_aabb.top_left[1])
-        x1 = int(self._peer_aabb.bottom_right[0])
-        y1 = int(self._peer_aabb.bottom_right[1])
-        if x0 < 0. or y1 < 0. or x1 > img.shape[1] or y1 > img.shape[0]:
-            self._log.error(
-                f"peer's video feed is not fully contained inside the monitor ("
-                f"{x0=}, {y0=}, {x1=}, {y1=}, {img.shape=})."
-            )
-            return
-        img = img[y0:y1, x0:x1]
-
-        # resize to the original format size and then convert to float32
-        img = resize_image_u8(
-            img,
-            (self._peer_format.width, self._peer_format.height),
-            Image.Resampling.BILINEAR
-        ).astype(np.float32) / 255.
+        # take a screenshot of the peer
+        img = self._take_peer_screenshot_f32()
 
         # split into cells.
         # new shape: (res_y, cell_size, res_x, cell_size, 3)
@@ -1326,6 +1422,44 @@ class VideoIo(GoofyIo):
             dtype=np.uint8
         )[:, :, :3][:, :, ::-1]  # BGRA → RGB
 
+    def _take_peer_screenshot_f32(self) -> np.ndarray:
+        """
+        take a screenshot, crop into the peer's bounding box, resize to the
+        peer's original format size, and convert to float32.
+        """
+
+        if self._peer_aabb is None:
+            raise Exception(
+                "can't take peer screenshot because its bounding box is "
+                "unknown."
+            )
+        if self._peer_format is None:
+            raise Exception(
+                "can't take peer screenshot because its format is unknown."
+            )
+
+        # take a screenshot
+        img = self._take_screenshot()
+
+        # crop into peer AABB
+        x0 = int(self._peer_aabb.top_left[0])
+        y0 = int(self._peer_aabb.top_left[1])
+        x1 = int(self._peer_aabb.bottom_right[0])
+        y1 = int(self._peer_aabb.bottom_right[1])
+        if x0 < 0. or y1 < 0. or x1 > img.shape[1] or y1 > img.shape[0]:
+            raise Exception(
+                f"peer's video feed is not fully contained inside the monitor ("
+                f"{x0=}, {y0=}, {x1=}, {y1=}, {img.shape=})."
+            )
+        img = img[y0:y1, x0:x1]
+
+        # resize to the original format size and then convert to float32
+        return resize_image_u8(
+            img,
+            (self._peer_format.width, self._peer_format.height),
+            Image.Resampling.BILINEAR
+        ).astype(np.float32) / 255.
+
     def n_corrupt_receives_increment(self):
         self._n_corrupt_receives += 1
 
@@ -1379,7 +1513,8 @@ def pack_bits(bits: np.ndarray, m: int) -> np.ndarray:
 
 def generate_qr(
     data: str | bytes,
-    border_factor: float = QR_BORDER_FACTOR
+    border_factor: float = QR_BORDER_FACTOR,
+    rgb: bool = True  # convert from grayscale to RGB
 ) -> np.ndarray:
     qr = qrcode.QRCode(
         version=1,
@@ -1405,6 +1540,10 @@ def generate_qr(
         ((padding, padding), (padding, padding)),
         constant_values=[255]
     )
+
+    if rgb:
+        # grayscale to RGB
+        img = np.dstack([img] * 3)
 
     return img
 
