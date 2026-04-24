@@ -50,7 +50,6 @@ QR_BORDER_FACTOR = .15
 # we put tiny squares at the top left and bottom right corners of the QR codes
 # so the other side can detect our bounding box accurately.
 HANDSHAKE_CORNER_DOT_COLOR = np.asarray([255, 0, 0], dtype=np.uint8)
-HANDSHAKE_CORNER_DOT_SIZE = 8
 
 
 """
@@ -719,7 +718,7 @@ class VideoIo(GoofyIo):
                 )
                 qr = resize_image_u8(qr, (qr_size, qr_size))
 
-                qr = draw_corner_squares(qr)
+                qr = self._draw_corner_squares(qr)
 
                 self._set_image(qr)
 
@@ -1140,7 +1139,9 @@ class VideoIo(GoofyIo):
             # refine qr_aabb based on the corner "dots" (squares) at the top
             # left and bottom right.
 
-            padding = rough_scale * HANDSHAKE_CORNER_DOT_SIZE
+            padding = rough_scale * self._handshake_corner_dot_size(
+                self._peer_format
+            )
             img_h, img_w = img.shape[:2]
 
             tl_x0 = int(max(0., qr_aabb.top_left[0] - padding))
@@ -1347,7 +1348,7 @@ class VideoIo(GoofyIo):
                 self._log.debug(
                     "corrupt receive: header checksum couldn't be verified"
                 )
-                self.n_corrupt_receives_increment()
+                self._n_corrupt_receives_increment()
             return
 
         packet_idx = int.from_bytes(header[6:10])
@@ -1409,7 +1410,7 @@ class VideoIo(GoofyIo):
                 f"corrupt receive: index too far ahead "
                 f"({packet_idx} > {self._in_valid_packet_idx})"
             )
-            self.n_corrupt_receives_increment()
+            self._n_corrupt_receives_increment()
             return
         elif not checksum_verified:
             # data checksum couldn't be verified so there must be errors in the
@@ -1417,7 +1418,7 @@ class VideoIo(GoofyIo):
             self._log.debug(
                 "corrupt receive: data checksum couldn't be verified"
             )
-            self.n_corrupt_receives_increment()
+            self._n_corrupt_receives_increment()
             return
 
         # at last! the header is correct, the index is correct, and the data is
@@ -1427,7 +1428,7 @@ class VideoIo(GoofyIo):
         self._in_buf += data
         self._in_buf_lock.release()
 
-        self.n_corrupt_receives_decrement()
+        self._n_corrupt_receives_decrement()
 
     def _take_screenshot(self) -> np.ndarray:
         screenshot = self._sct.grab(self._monitor)
@@ -1474,7 +1475,7 @@ class VideoIo(GoofyIo):
             Image.Resampling.BILINEAR
         ).astype(np.float32) / 255.
 
-    def n_corrupt_receives_increment(self):
+    def _n_corrupt_receives_increment(self):
         self._n_corrupt_receives += 1
 
         n_corrupt_packets = int(
@@ -1484,10 +1485,33 @@ class VideoIo(GoofyIo):
             self._n_corrupt_receives = 0
             self._request_retransmission = True
 
-    def n_corrupt_receives_decrement(self):
+    def _n_corrupt_receives_decrement(self):
         self._n_corrupt_receives = max(
             0,
             self._n_corrupt_receives - 1
+        )
+
+    def _draw_corner_squares(
+        self,
+        img: np.ndarray[np.uint8]
+    ) -> np.ndarray[np.uint8]:
+        assert img.dtype == np.uint8, f"{img.dtype=} is not uint8"
+
+        if len(img.shape) == 2:
+            img = np.dstack([img] * 3)
+
+        dot_size = self._handshake_corner_dot_size(self.out_format)
+        img[:dot_size, :dot_size] = \
+            img[:dot_size, :dot_size] * 0 + HANDSHAKE_CORNER_DOT_COLOR
+        img[-dot_size:, -dot_size:] = \
+            img[-dot_size:, -dot_size:] * 0 + HANDSHAKE_CORNER_DOT_COLOR
+
+        return img
+
+    def _handshake_corner_dot_size(self, f: Format) -> int:
+        return max(
+            int(.25 * QR_BORDER_FACTOR * min(f.width, f.height)),
+            2
         )
 
 
@@ -1724,19 +1748,3 @@ def resize_image_u8(
     img_pil = Image.fromarray(img)
     img_pil = img_pil.resize(new_size, interpolation)
     return np.array(img_pil)
-
-
-def draw_corner_squares(img: np.ndarray[np.uint8]) -> np.ndarray[np.uint8]:
-    assert img.dtype == np.uint8, f"{img.dtype=} is not uint8"
-
-    if len(img.shape) == 2:
-        img = np.dstack([img] * 3)
-
-    img[:HANDSHAKE_CORNER_DOT_SIZE, :HANDSHAKE_CORNER_DOT_SIZE] = \
-        img[:HANDSHAKE_CORNER_DOT_SIZE, :HANDSHAKE_CORNER_DOT_SIZE] \
-        * 0 + HANDSHAKE_CORNER_DOT_COLOR
-    img[-HANDSHAKE_CORNER_DOT_SIZE:, -HANDSHAKE_CORNER_DOT_SIZE:] = \
-        img[-HANDSHAKE_CORNER_DOT_SIZE:, -HANDSHAKE_CORNER_DOT_SIZE:] \
-        * 0 + HANDSHAKE_CORNER_DOT_COLOR
-
-    return img
