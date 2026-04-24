@@ -1011,7 +1011,7 @@ class VideoIo(GoofyIo):
 
     def _receive_thread_run(self):
         try:
-            self._sct = mss.mss()
+            self._sct = mss.MSS()
             monitors = self._sct.monitors
 
             if self._in_monitor_idx + 1 >= len(monitors):
