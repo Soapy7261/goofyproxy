@@ -78,22 +78,26 @@ The following Python packages are required for this project.
 numpy scipy PySide6 mss Pillow qrcode pyzbar netifaces2 opencv-python
 ```
 
-## Computing Power
+## Windows
 
-For fast data transfer, the program needs to take and analyze many screenshots
-every second, and my code isn't super optimized (skill issue), so you're gonna
-need a fairly powerful computer to be able to keep up, otherwise the program
-will keep falling behind and asking for retransmissions.
+Make sure to install the
+[Microsoft Visual C++ Redistributables](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
+
+## Linux
+
+Unfortunately, Wayland-based compositors (GNOME with Wayland, hyprland, etc.)
+don't seem to work with `mss` for taking screenshots. If you know a fix, please
+open an issue.
 
 ## Fractional Scaling
 
 For more precision, try to avoid non-integer display scaling.
 
-## Linux-specific
+## Computing Power
 
-Unfortunately, Wayland-based compositors (GNOME with Wayland, hyprland, etc.)
-don't seem to work with `mss` for taking screenshots. If you know a fix, please
-open an issue.
+For fast data transfer, the program needs to process many screenshots per
+second, so you're gonna need a fairly powerful computer to be able to keep up,
+otherwise VideoIo will keep falling behind and asking for retransmissions.
 
 # Usage
 
