@@ -11,7 +11,7 @@ import io
 import ipaddress
 import netifaces
 
-from goofyio import *
+from .goofyio import *
 
 # goofy proxy version
 GOOFY_VERSION = 1

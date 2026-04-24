@@ -1,0 +1,14 @@
+[project]
+name = "videoio"
+version = "0.1.0"
+dependencies = [
+    "numpy>=2.3.0",
+    "scipy>=1.17.1",
+    "PySide6>=6.11.0",
+    "mss>=10.1.0",
+    "pillow>=12.2.0",
+    "qrcode>=8.2",
+    "pyzbar>=0.1.9",
+    "opencv-python>=4.13.0.92",
+    "goofyproxy>=0.1.0",
+]

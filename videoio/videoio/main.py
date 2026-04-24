@@ -2,10 +2,10 @@ import argparse
 from enum import StrEnum
 from typing import Self
 
-from goofy_client import GoofyClient
-from goofy_server import GoofyServer
+from goofyproxy import GoofyServer, GoofyClient
+from goofyproxy.common import *
+
 from videoio import VideoIo
-from common import *
 
 
 DEFAULT_FORMAT = "640x480-16-2@2"

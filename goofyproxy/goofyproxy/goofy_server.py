@@ -4,8 +4,8 @@ import time
 from dataclasses import dataclass, field
 import logging
 
-from goofyio import *
-from common import *
+from .goofyio import *
+from .common import *
 
 
 @dataclass

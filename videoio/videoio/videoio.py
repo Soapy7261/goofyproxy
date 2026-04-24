@@ -32,8 +32,9 @@ import qrcode.constants
 from pyzbar import pyzbar
 import cv2
 
-from goofyio import GoofyIo
-from common import *
+from goofyproxy import GoofyIo
+from goofyproxy.common import *
+
 
 VIDEOIO_VERSION = 1
 VIDEOIO_MIN_PEER_VERSION = 1

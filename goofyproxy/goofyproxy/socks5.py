@@ -16,7 +16,7 @@ import select
 import logging
 import ipaddress
 
-from common import *
+from .common import *
 
 
 SOCKS_VERSION = 5

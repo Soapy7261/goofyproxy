@@ -7,8 +7,8 @@ import logging
 import random
 import ipaddress
 
-from goofyio import *
-from common import *
+from .goofyio import *
+from .common import *
 
 
 SOCKS_VERSION = 5
