@@ -1,0 +1,8 @@
+{
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "./goofyproxy",
+        "./videoio/videoio",
+        "./baleio/baleio"
+    ]
+}
