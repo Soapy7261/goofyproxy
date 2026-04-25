@@ -626,10 +626,10 @@ class VideoIo(GoofyIo):
         return mons
 
     def _receive(self, size: int) -> bytes:
-        if not self.running():
-            raise ConnectionError("not running")
-
         while True:
+            if not self.running():
+                raise ConnectionError("not running")
+
             if self._peer_format:
                 poll_interval = .5 / self._peer_format.rate
             else:
@@ -646,8 +646,8 @@ class VideoIo(GoofyIo):
 
             data = bytes(self._in_buf[:size])
             self._in_buf = self._in_buf[size:]
-
             self._in_buf_lock.release()
+
             return data
 
     def _send(self, data: bytes):
