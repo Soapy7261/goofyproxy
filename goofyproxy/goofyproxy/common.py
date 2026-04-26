@@ -248,6 +248,81 @@ def format_data_rate(n_bytes_per_second: int) -> str:
     return format_data_size(n_bytes_per_second) + "/s"
 
 
+def parse_data_size(s: str) -> float:
+    """
+    parse data size from a string and return the number of bytes as a float.
+    """
+    try:
+        s = s.strip()
+
+        num = ""
+        for i in range(len(s)):
+            c = s[i]
+            if c not in "0123456789.":
+                break
+            num += c
+        suffix = s[len(num):].strip()
+        num = float(num)
+
+        fac = 1.
+        if suffix[-1] == "b":
+            fac /= 8.
+        elif suffix[-1] != "B":
+            raise Exception("invalid suffix")
+        suffix = suffix[:-1].lower()
+
+        if not suffix:
+            return num * fac
+        elif suffix == "k":
+            fac *= 1e3
+        elif suffix == "m":
+            fac *= 1e6
+        elif suffix == "g":
+            fac *= 1e9
+        elif suffix == "t":
+            fac *= 1e12
+        elif suffix == "p":
+            fac *= 1e15
+        elif suffix == "ki":
+            fac *= 1024
+        elif suffix == "mi":
+            fac *= 1024 ** 2
+        elif suffix == "gi":
+            fac *= 1024 ** 3
+        elif suffix == "ti":
+            fac *= 1024 ** 4
+        elif suffix == "pi":
+            fac *= 1024 ** 5
+        else:
+            raise Exception("invalid suffix")
+
+        return num * fac
+    except Exception as e:
+        raise ValueError(
+            f"failed to convert \"{s}\" to data size: {format_exception(e)}"
+        )
+
+
+def parse_data_rate(s: str) -> float:
+    """
+    parse data rate from a string and return the number of bytes per second as a
+    float.
+    """
+    try:
+        s = s.strip()
+        if s.lower().endswith(("/s", "ps")):
+            s = s[:-2]
+        elif s.lower().endswith("/ s"):
+            s = s[:-3]
+        else:
+            raise Exception("invalid suffix")
+        return parse_data_size(s)
+    except Exception as e:
+        raise ValueError(
+            f"failed to convert \"{s}\" to data rate: {format_exception(e)}"
+        )
+
+
 def goofy_handshake_solve(question: bytes) -> tuple[bytes, int]:
     if len(question) < 8:
         raise ValueError("goofy handshake question too small")
