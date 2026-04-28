@@ -27,6 +27,11 @@ Now let's see what this project provides.
 fundumental classes we can build upon: `GoofyIo`, `GoofyServer` and
 `GoofyClient`.
 
+## WsIo
+
+[WsIo](./wsio) transfers data over WsIo calls. See [WsIo Server](./wsio-server)
+for more details.
+
 ## VideoIo
 
 [VideoIo](./videoio) allows data transfer over video calls and runs goofyproxy

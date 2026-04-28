@@ -1,0 +1,8 @@
+[project]
+name = "wsio"
+version = "0.1.0"
+dependencies = [
+    "requests>=2.33.1",
+    "websocket-client>=1.9.0",
+    "goofyproxy>=0.1.0",
+]
