@@ -448,7 +448,7 @@ class GoofyServer:
         udp_sock: socket.socket | None = None
         relay: GoofyServerUdpRelay | None = None
         try:
-            self.log.info("starting relay")
+            self.log.info("starting UDP relay")
 
             # open the UDP relay socket on a random port
             udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -489,7 +489,7 @@ class GoofyServer:
                     data
                 ))
 
-            self.log.debug("session ended")
+            self.log.debug("UDP relay session ended")
         except BaseException as e:
             self.log.error(format_exception(e))
         finally:
