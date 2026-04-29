@@ -377,25 +377,16 @@ class GoofyClient:
                         self.bypass_filter,
                         self.bypass_filter_type
                     ):
-                        self._log.warning(
-                            f"FILTRES: bypass {dst_addr}"
-                        )
                         # bypass
                         self._log.info(f"{cmd_name} (direct / bypassed)")
                         self._cmd_connect_direct(
                             client, atyp, dst_host, dst_port
                         )
                     else:
-                        self._log.warning(
-                            f"FILTRES: proxy {dst_addr}"
-                        )
                         # proxy
                         self._log.info(cmd_name)
                         self._cmd_connect(client, atyp, dst_host, dst_port)
                 else:
-                    self._log.warning(
-                        f"FILTRES: block {dst_addr}"
-                    )
                     self._send_error(client, REP_CONN_REFUSED)
             elif cmd == CMD_BIND:
                 self._log.info(cmd_name)
@@ -940,9 +931,6 @@ class GoofyClient:
                         self.address_filter,
                         self.address_filter_type
                     ):
-                        self._log.warning(
-                            f"FILTRES: block {target_addr}"
-                        )
                         continue
 
                     if is_address_allowed(
@@ -950,9 +938,6 @@ class GoofyClient:
                         self.bypass_filter,
                         self.bypass_filter_type
                     ):
-                        self._log.warning(
-                            f"FILTRES: bypass {target_addr}"
-                        )
                         try:
                             relay.sock.sendto(
                                 payload,
@@ -961,9 +946,6 @@ class GoofyClient:
                         except OSError:
                             pass
                     else:
-                        self._log.warning(
-                            f"FILTRES: proxy {target_addr}"
-                        )
                         # proxy
                         self._enqueue_outgoing_packet(GoofyUdpPacket(
                             udp_relay_id,

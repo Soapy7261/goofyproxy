@@ -212,9 +212,6 @@ class GoofyServer:
                         address_filter,
                         address_filter_type
                     ):
-                        self._log.warning(
-                            f"FILTRES: allow {addr}"
-                        )
                         t = threading.Thread(
                             target=self._cmd_open_socket,
 
@@ -225,9 +222,6 @@ class GoofyServer:
                         )
                         t.start()
                     else:
-                        self._log.warning(
-                            f"FILTRES: block {addr}"
-                        )
                         self._enqueue_outgoing_packet(GoofyEventSocketStatus(
                             packet.socket_id_u32,
                             GoofySocketStatus.FailedToOpenConnRefused
@@ -449,16 +443,9 @@ class GoofyServer:
                         self.address_filter,
                         self.address_filter_type
                     ):
-                        self._log.warning(
-                            f"FILTRES: allow {remote_host}:{remote_port}"
-                        )
                         break
                     elif time.time() - start_time > self.bind_timeout:
                         raise TimeoutError()
-
-                    self._log.warning(
-                        f"FILTRES: block {remote_host}:{remote_port}"
-                    )
             except OSError as e:
                 close_socket(bind_sock)
 
@@ -540,14 +527,8 @@ class GoofyServer:
                     self.address_filter,
                     self.address_filter_type
                 ):
-                    self._log.warning(
-                        f"FILTRES: block {sender_addr[0]}:{sender_addr[1]}"
-                    )
                     continue
 
-                self._log.warning(
-                    f"FILTRES: allow {sender_addr[0]}:{sender_addr[1]}"
-                )
                 self._enqueue_outgoing_packet(GoofyUdpPacket(
                     packet.udp_relay_id_u16,
                     sender_addr[0],
