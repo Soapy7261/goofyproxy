@@ -6,7 +6,7 @@ from goofyproxy import GoofyServer, GoofyClient, AddressFilterType, \
     ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN
 from goofyproxy.common import *
 
-from wsio import WsIo, delete_account
+from wsio import WsIo, CallerMode, CalleeMode, delete_account
 
 
 def run(args: argparse.Namespace):
@@ -23,20 +23,34 @@ def run(args: argparse.Namespace):
         )
         return
 
-    gio = WsIo(
-        url=args.url,
-        id=args.id,
-        password=args.password,
-        peer_id=args.peer,
-        is_caller=(args.command == "client"),
-        interval_min=args.interval_min,
-        interval_max=args.interval_max,
-        max_out_packet_size=parse_data_size(args.max_out_packet_size),
-        warm_up=not args.no_warmup,
-        ssl_verify=not args.no_ssl_verify,
-    )
-
     if args.command == "server":
+        peers: list[str] = list(filter(
+            lambda s: bool(s),
+            map(
+                lambda s: s.strip(),
+                args.peers.split(",")
+            )
+        ))
+
+        if not args.peers_block and not peers:
+            print(
+                "no peers to accept calls from! either define one or more user "
+                "IDs in --peers or enable --peers-block."
+            )
+            return
+
+        gio = WsIo(
+            url=args.url,
+            id=args.id,
+            password=args.password,
+            call_mode=CalleeMode(peers, args.peers_block),
+            interval_min=args.interval_min,
+            interval_max=args.interval_max,
+            max_out_packet_size=parse_data_size(args.max_out_packet_size),
+            warm_up=not args.no_warmup,
+            ssl_verify=not args.no_ssl_verify,
+        )
+
         GoofyServer(
             gio,
             send_interval=min(.05, gio.interval_min),
@@ -46,6 +60,18 @@ def run(args: argparse.Namespace):
             if args.address_filter_allow else AddressFilterType.Block,
         )
     elif args.command == "client":
+        gio = WsIo(
+            url=args.url,
+            id=args.id,
+            password=args.password,
+            call_mode=CallerMode(args.peer),
+            interval_min=args.interval_min,
+            interval_max=args.interval_max,
+            max_out_packet_size=parse_data_size(args.max_out_packet_size),
+            warm_up=not args.no_warmup,
+            ssl_verify=not args.no_ssl_verify,
+        )
+
         GoofyClient(
             gio,
             host="0.0.0.0",
@@ -150,8 +176,8 @@ def main():
         p.add_argument(
             "id",
             type=str,
-            help="user ID to send packets as. a new user will be created if the ID"
-            "doesn't match an existing one."
+            help="user ID to send packets as. a new user will be created if "
+            "the ID doesn't match an existing one."
         )
         p.add_argument(
             "password",
@@ -159,11 +185,21 @@ def main():
             help="password for the provided user ID"
         )
 
+    default = ""
     parser_server.add_argument(
         "-P",
-        "--peer",
+        "--peers",
+        default=default,
         type=str,
-        help="optional user ID to accept calls from"
+        help=f"[{default=}] comma-separated list of user IDs to accept or "
+        "block calls from, depending on --peers-block."
+    )
+    parser_server.add_argument(
+        "-b",
+        "--peers-block",
+        action="store_true",
+        help="if disabled (default), will only accept calls from user IDs "
+        "in --peers. if enabled, will accept calls from anyone but --peers."
     )
     parser_client.add_argument(
         "-P",
@@ -180,8 +216,8 @@ def main():
             "--interval-min",
             type=float,
             default=default,
-            help=f"[{default=}] minimum delay in seconds between each iteration of "
-            "the send-receive loop."
+            help=f"[{default=}] minimum delay in seconds between each "
+            "iteration of the send-receive loop."
         )
         default = .5
         p.add_argument(
@@ -189,8 +225,8 @@ def main():
             "--interval-max",
             type=float,
             default=default,
-            help=f"[{default=}] maximum delay in seconds between each iteration of "
-            "the send-receive loop."
+            help=f"[{default=}] maximum delay in seconds between each "
+            "iteration of the send-receive loop."
         )
         default = "512 KiB"
         p.add_argument(
@@ -198,15 +234,16 @@ def main():
             "--max-out-packet-size",
             type=str,
             default=default,
-            help=f"[{default=}] maximum outgoing packet size  in each iteration of "
-            "the send-receive loop."
+            help=f"[{default=}] maximum outgoing packet size  in each "
+            "iteration of the send-receive loop."
         )
         p.add_argument(
             "-q",
             "--no-warmup",
             action="store_true",
-            help="disable warm-up which sends a few dummy requests to the server "
-            "with random delays between them before starting or waiting for a call."
+            help="disable warm-up which sends a few dummy requests to the "
+            "server with random delays between them before starting or waiting "
+            "for a call."
         )
 
     for p in (parser_server, parser_client, parser_delete_acc):
@@ -246,9 +283,9 @@ def main():
         "-a",
         "--address-filter-allow",
         action="store_true",
-        help="if disabled (default), all remote connections matching the "
-        "address filter will be blocked. if enabled, all connections will be "
-        "blocked except ones matching the address filter."
+        help="if disabled (default), all remote connections matching "
+        "--address-filter will be blocked. if enabled, all connections will be "
+        "blocked except ones matching --address-filter."
     )
 
     default = ""
@@ -266,8 +303,9 @@ def main():
         "--address-filter-allow",
         action="store_true",
         help="if disabled (default), all remote connections (direct or "
-        "proxied) matching the address filter will be blocked. if enabled, all "
-        "connections will be blocked except ones matching the address filter."
+        "proxied) matching --address-filter filter will be blocked. if "
+        "enabled, all connections will be blocked except ones matching "
+        "--address-filter."
     )
     default = ADDRESS_FILTER_LAN
     parser_client.add_argument(
@@ -282,10 +320,10 @@ def main():
         "-B",
         "--bypass-filter-reverse",
         action="store_true",
-        help="if disabled (default), addresses matching the bypass filter will "
+        help="if disabled (default), addresses matching --bypass-filter will "
         "use direct connections and other addresses will be proxied. if "
-        "enabled, only addresses matching the bypass filter will be proxied "
-        "and the rest will use direct connections."
+        "enabled, only addresses matching --bypass-filter will be proxied and "
+        "the rest will use direct connections."
     )
 
     for p in (

@@ -8,6 +8,7 @@ import threading
 import random
 import gzip
 import base64
+from typing import NamedTuple
 
 import requests
 from http import HTTPStatus
@@ -109,6 +110,22 @@ class WsClient:
         self.close()
 
 
+class CallerMode(NamedTuple):
+    who_to_call: str
+    """user ID to call"""
+
+
+class CalleeMode(NamedTuple):
+    accept_calls_from: list[str]
+    """a list of user IDs to wait for an incoming call from"""
+
+    block_mode: bool = False
+    """
+    if True, will accept incoming calls from anyone except the IDs in
+    `accept_calls_from`.
+    """
+
+
 class WsIo(GoofyIo):
     """
     a `GoofyIo` that transfers data through WsIo, a very basic WebSocket-based
@@ -118,7 +135,7 @@ class WsIo(GoofyIo):
     Args:
 
         url (str):
-            server URL (HTTPS) ending with a slash.
+            WsIo server URL (HTTPS) ending with a slash.
             example: `https://example.com/wsio/`
 
         id (str):
@@ -128,13 +145,9 @@ class WsIo(GoofyIo):
         password (str):
             password for the provided user ID.
 
-        peer_id (str | None):
-            user ID to communicate with. optional only if is_caller is False.
-
-        is_caller (bool):
-            if True, will call the peer through the WsIo server. otherwise, will
-            wait for an incoming call from the peer (or anyone if peer_id is
-            `None`).
+        call_mode (CallerMode | CalleeMode):
+            either a CallerMode defining a user ID to call, or a CalleeMode
+            defining which user IDs to accept or block calls from.
 
         interval_min (float):
             minimum delay in seconds between each iteration of the send-receive
@@ -164,8 +177,7 @@ class WsIo(GoofyIo):
     url: str
     id: str
     password: str
-    peer_id: str | None
-    is_caller: bool
+    call_mode: CallerMode | CalleeMode
     interval_min: float
     interval_max: float
     max_out_packet_size: int
@@ -183,6 +195,7 @@ class WsIo(GoofyIo):
     _thread: threading.Thread
     _stopping: bool = False
 
+    _peer_id: str | None = None
     _call_timestamp: int = 0
     _ws: WsClient | None = None
 
@@ -191,8 +204,7 @@ class WsIo(GoofyIo):
         url: str,
         id: str,
         password: str,
-        peer_id: str | None,
-        is_caller: bool,
+        call_mode: CallerMode | CalleeMode,
         interval_min: float = .1,
         interval_max: float = .5,
         max_out_packet_size: int = 512 * 1024,
@@ -204,20 +216,45 @@ class WsIo(GoofyIo):
         validate_id(id)
         validate_password(password)
 
-        if peer_id is not None:
-            validate_id(peer_id)
-            if peer_id == id:
+        if isinstance(call_mode, CallerMode):
+            validate_id(call_mode.who_to_call)
+            if call_mode.who_to_call == id:
                 raise ValueError(
-                    f"id and peer_id must be different (both are {id})"
+                    f"call_mode.who_to_call and id must be different (both are "
+                    f"{id})."
                 )
+        elif isinstance(call_mode, CalleeMode):
+            if not isinstance(call_mode.accept_calls_from, list):
+                raise ValueError(
+                    f"call_mode.accept_calls_from must be a list[str], not "
+                    f"{type(call_mode.accept_calls_from)}."
+                )
+            for peer_id in call_mode.accept_calls_from:
+                validate_id(peer_id)
+                if peer_id == id:
+                    raise ValueError(
+                        "all user IDs in call_mode.accept_calls_from must be "
+                        "different from id."
+                    )
+
+            if not call_mode.block_mode and not call_mode.accept_calls_from:
+                raise ValueError(
+                    "call_mode.accept_calls_from is empty and "
+                    "call_mode.block_mode is False so we're accepting calls "
+                    "from nobody!"
+                )
+        else:
+            raise ValueError(
+                f"call_mode must be either a CallerMode or CalleeMode, not "
+                f"{type(call_mode)}."
+            )
 
         self._log = make_logger(f"WsIo", log_level)
 
         self.url = url
         self.id = id
         self.password = password
-        self.peer_id = peer_id
-        self.is_caller = is_caller
+        self.call_mode = call_mode
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
         self.max_out_packet_size = int(max_out_packet_size)
@@ -234,8 +271,7 @@ class WsIo(GoofyIo):
         out_data_rate = self.max_out_packet_size / avg_interval
         self._log.info(
             f"URL: {self.url}\n"
-            f"ID: {self.id}\n"
-            f"peer ID: {self.peer_id}\n"
+            f"user ID: {self.id}\n"
             f"interval range: {self.interval_min}-{self.interval_max} s\n"
             f"max. outgoing packet size: "
             f"{format_data_size(self.max_out_packet_size)}\n"
@@ -260,10 +296,7 @@ class WsIo(GoofyIo):
         self._auth_code = generate_auth_code(self.id, self.password)
         res = self._request_json(
             "prepare",
-            {
-                "auth": self._auth_code,
-                "peer": peer_id
-            }
+            {"auth": self._auth_code}
         )
 
         auth_result = res["authResult"]
@@ -335,19 +368,14 @@ class WsIo(GoofyIo):
                     time.sleep(.5 + 1.8 * random.random())
                     self._dummy_request("dummy")
 
-            if self.is_caller:
+            if isinstance(self.call_mode, CallerMode):
                 # call the peer
-                if self.peer_id is None:
-                    raise ValueError(
-                        "peer_id is required when is_caller is True (who are "
-                        "we supposed to call?)"
-                    )
-                self._log.info("calling peer")
+                self._log.info(f"calling peer {self.call_mode.who_to_call}")
                 self._ws = WsClient(
                     f"{self.url}call",
                     {
                         "auth": self._auth_code,
-                        "peer": self.peer_id
+                        "peer": self.call_mode.who_to_call
                     },
                     ssl_verify=self.ssl_verify
                 )
@@ -358,18 +386,41 @@ class WsIo(GoofyIo):
                     raise ConnectionAbortedError(
                         f"couldn't start call: {msg}"
                     )
-            else:
-                # wait for an incoming call from the peer (or anyone if peer_id
-                # is None).
+            elif isinstance(self.call_mode, CalleeMode):
+                # wait for an incoming call
 
-                if self.peer_id is None:
-                    self._log.info("waiting for an incoming call")
-                else:
+                if self.call_mode.block_mode \
+                        and self.call_mode.accept_calls_from:
                     self._log.info(
-                        f"waiting for an incoming call from {self.peer_id}"
+                        f"waiting for an incoming call from anyone except "
+                        f"{", ".join(self.call_mode.accept_calls_from)}"
+                    )
+                elif self.call_mode.block_mode:
+                    self._log.info(
+                        "waiting for an incoming call from anyone"
+                    )
+                elif len(self.call_mode.accept_calls_from) == 1:
+                    self._log.info(
+                        f"waiting for an incoming call from user "
+                        f"{", ".join(self.call_mode.accept_calls_from)}"
+                    )
+                elif len(self.call_mode.accept_calls_from) > 1:
+                    self._log.info(
+                        f"waiting for an incoming call from users "
+                        f"{", ".join(self.call_mode.accept_calls_from)}"
+                    )
+                else:
+                    self._log.warning(
+                        f"waiting for an incoming call from nobody (what the?)"
                     )
 
+                first_iter = True
                 while True:
+                    if first_iter:
+                        first_iter = False
+                    else:
+                        time.sleep(5.)
+
                     res = self._request_json(
                         "whos-calling",
                         {"auth": self._auth_code}
@@ -382,32 +433,35 @@ class WsIo(GoofyIo):
                     calls = res["calls"]
 
                     if not calls:
-                        time.sleep(5.)
                         continue
 
-                    if self.peer_id is None:
-                        self.peer_id = calls[0]["caller"]
-                        self._call_timestamp = calls[0]["timestamp"]
+                    self._peer_id = None
+                    if self.call_mode.block_mode:
+                        for call in calls:
+                            if call["caller"] not in \
+                                    self.call_mode.accept_calls_from:
+                                self._peer_id = call["caller"]
+                                self._call_timestamp = call["timestamp"]
+                                break
+                    else:
+                        for call in calls:
+                            if call["caller"] in \
+                                    self.call_mode.accept_calls_from:
+                                self._peer_id = call["caller"]
+                                self._call_timestamp = call["timestamp"]
+                                break
+
+                    if self._peer_id is None:
+                        continue
+                    else:
                         break
 
-                    found_call = False
-                    for call in calls:
-                        if call["caller"] == self.peer_id:
-                            self._call_timestamp = call["timestamp"]
-                            found_call = True
-                            break
-                    if not found_call:
-                        time.sleep(5.)
-                        continue
-
-                    break
-
-                self._log.info(f"answering incoming call from {self.peer_id}")
+                self._log.info(f"answering incoming call from {self._peer_id}")
                 self._ws = WsClient(
                     f"{self.url}pickup",
                     {
                         "auth": self._auth_code,
-                        "peer": self.peer_id
+                        "peer": self._peer_id
                     },
                     ssl_verify=self.ssl_verify
                 )
@@ -536,7 +590,7 @@ class WsIo(GoofyIo):
                 return res
             except Exception as e:
                 self._log.error(
-                    f"\"{path}\" failed ({i}/{N_RETRIES}): "
+                    f"\"/{path}\" failed ({i}/{N_RETRIES}): "
                     f"{format_exception(e)}"
                 )
         raise ConnectionError(f"too many failures in \"{path}\"")
@@ -612,7 +666,9 @@ def validate_server_url(url: str):
 def validate_id(id: str):
     try:
         if not isinstance(id, str):
-            raise Exception("must be a string")
+            raise Exception(
+                f"must be a string, not {type(id)}"
+            )
         if not id:
             raise Exception("cannot be empty")
         if len(id) > 64:
