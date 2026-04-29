@@ -5,7 +5,8 @@ from typing import Self
 import logging
 import argparse
 
-from goofyproxy import GoofyServer, GoofyClient
+from goofyproxy import GoofyServer, GoofyClient, AddressFilterType, \
+    ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN
 import goofyproxy.common as goofycommon
 
 from videoio import VideoIo
@@ -25,7 +26,11 @@ def chat_send(gio: VideoIo):
 
 
 def run(args: argparse.Namespace):
-    if args.mode == "list_monitors":
+    if args.command == "filter-help":
+        print(ADDRESS_FILTER_HELP)
+        return
+
+    if args.command == "list-monitors":
         monitors = VideoIo.get_monitors()
         for i in range(len(monitors)):
             print(f"monitor {i}: {monitors[i]}")
@@ -65,7 +70,7 @@ def run(args: argparse.Namespace):
     if not gio.running():
         return
 
-    if args.mode == "chat":
+    if args.command == "chat":
         # sending
         threading.Thread(target=chat_send, args=(gio,), daemon=True).start()
 
@@ -74,21 +79,33 @@ def run(args: argparse.Namespace):
             msg_len = int.from_bytes(gio.receive(2))
             msg = gio.receive(msg_len).decode()
             print(f"<<< {msg}")
-    elif args.mode == "server":
-        GoofyServer(gio, send_interval=.04)
-        gio.stop()
-    elif args.mode == "client":
-        if not args.port:
-            print("port is required in client mode")
-            return
+    elif args.command == "server":
+        GoofyServer(
+            gio,
+            send_interval=.05,
+            address_filter=args.address_filter,
 
+            address_filter_type=AddressFilterType.Allow
+            if args.address_filter_allow else AddressFilterType.Block,
+        )
+        gio.stop()
+    elif args.command == "client":
         GoofyClient(
             gio,
             host="0.0.0.0",
             port=args.port,
             buf_size=args.bufsize,
-            poll_interval=.04,
-            send_interval=.04
+            poll_interval=.05,
+            send_interval=.05,
+            address_filter=args.address_filter,
+
+            address_filter_type=AddressFilterType.Allow
+            if args.address_filter_allow else AddressFilterType.Block,
+
+            bypass_filter=args.bypass_filter,
+
+            bypass_filter_type=AddressFilterType.Block
+            if args.bypass_filter_reverse else AddressFilterType.Allow,
         )
         gio.stop()
     else:
@@ -132,127 +149,218 @@ class LogLevel(StrEnum):
 
 def main():
     # command line parser
+
     parser = argparse.ArgumentParser(
         description="goofy proxy using VideoIo: share your internet connection "
         "with a friend through a video call"
     )
-    parser.add_argument(
-        "mode",
-        choices=["server", "client", "chat", "list_monitors"],
-        help="which mode to run in"
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        help="sub-commands"
     )
-    parser.add_argument(
-        "-f",
-        "--format",
-        type=str,
-        default=DEFAULT_FORMAT,
-        help="output grid format represented as "
-        "\"{width}x{height}-{cell_size}-{bits_per_cell}@{rate}\" (default: "
-        f"{DEFAULT_FORMAT})"
+
+    parser_server = subparsers.add_parser(
+        "server",
+        help="run GoofyServer on top of VideoIo."
     )
-    parser.add_argument(
-        "-m",
-        "--monitor",
-        type=int,
-        default=0,
-        help="index of the monitor that's displaying the other side's video "
-        "feed (see list_monitors), starting from 0."
+    parser_client = subparsers.add_parser(
+        "client",
+        help="run GoofyClient on top of VideoIo."
     )
-    parser.add_argument(
-        "-S",
-        "--sender-id",
-        type=str,
-        help="VideoIo sender ID. if not provided, one will be generated."
+    parser_chat = subparsers.add_parser(
+        "chat",
+        help="run a basic chat session over VideoIo."
     )
-    parser.add_argument(
-        "-P",
-        "--peer-id",
-        type=str,
-        help="sender ID of the peer. if not provided, the first detected peer "
-        "will be chosen."
+    parser_list_monitors = subparsers.add_parser(
+        "list-monitors",
+        help="print a list of available monitors for reading the peer's video "
+        "feed."
     )
-    parser.add_argument(
-        "--start-immediately",
-        action="store_true",
-        help="start the VideoIo handshake process as soon as the window opens. "
-        "if not enabled, will wait for a double click."
+    parser_filter_help = subparsers.add_parser(
+        "filter-help",
+        help="print a detailed help message on address filter patterns."
     )
-    default = 2.
-    parser.add_argument(
-        "-s",
-        "--screenshot-speed",
-        type=float,
-        default=default,
-        help=f"[{default=}] the VideoIo receive thread will take a screenshot "
-        "and read the peer's video feed this many times for every \"frame\" "
-        "(1 / peer_format.rate). it may be helpful to use a higher value for "
-        "this in certain cases where the frame rate of the peer's format is "
-        "low (e.g. rate <= 2) while the cells are small and detailed, because "
-        "video compression usually improves the image quality if the image "
-        "stays still for some time (so by taking more screenshots we "
-        "effectively wait for the image quality to improve so we can read the "
-        "data without corruption)."
-    )
-    default = 2
-    parser.add_argument(
-        "-c",
-        "--corrupt-packet-threshold",
-        type=int,
-        default=default,
-        help=f"[{default=}] if we get this many (or more) corrupt packets "
-        "(e.g. index too far ahead or checksum unverified), we'll ask the "
-        "other side to start retransmitting from the last packet index we "
-        "properly received."
-    )
-    default = 2.
-    parser.add_argument(
-        "-w",
-        "--handshake-interval",
-        type=float,
-        default=default,
-        help=f"[{default=}] how much to wait (in seconds) after each handshake "
-        "stage so the other side has time to see our responses."
-    )
-    parser.add_argument(
-        "-W",
-        "--position",
-        type=str,
-        help="optional initial window position represented as \"x,y\" "
-        "(example: 25,100)"
-    )
-    parser.add_argument(
+
+    for p in (parser_server, parser_client, parser_chat):
+        p.add_argument(
+            "-f",
+            "--format",
+            type=str,
+            default=DEFAULT_FORMAT,
+            help="output grid format represented as "
+            "\"{width}x{height}-{cell_size}-{bits_per_cell}@{rate}\" (default: "
+            f"{DEFAULT_FORMAT})"
+        )
+        p.add_argument(
+            "-m",
+            "--monitor",
+            type=int,
+            default=0,
+            help="index of the monitor that's displaying the other side's video "
+            "feed (see list_monitors), starting from 0."
+        )
+        p.add_argument(
+            "-S",
+            "--sender-id",
+            type=str,
+            help="VideoIo sender ID. if not provided, one will be generated."
+        )
+        p.add_argument(
+            "-P",
+            "--peer-id",
+            type=str,
+            help="sender ID of the peer. if not provided, the first detected peer "
+            "will be chosen."
+        )
+        p.add_argument(
+            "--start-immediately",
+            action="store_true",
+            help="start the VideoIo handshake process as soon as the window opens. "
+            "if not enabled, will wait for a double click."
+        )
+        default = 2.
+        p.add_argument(
+            "-g",
+            "--screenshot-speed",
+            type=float,
+            default=default,
+            help=f"[{default=}] the VideoIo receive thread will take a screenshot "
+            "and read the peer's video feed this many times for every \"frame\" "
+            "(1 / peer_format.rate). it may be helpful to use a higher value for "
+            "this in certain cases where the frame rate of the peer's format is "
+            "low (e.g. rate <= 2) while the cells are small and detailed, because "
+            "video compression usually improves the image quality if the image "
+            "stays still for some time (so by taking more screenshots we "
+            "effectively wait for the image quality to improve so we can read the "
+            "data without corruption)."
+        )
+        default = 2
+        p.add_argument(
+            "-c",
+            "--corrupt-packet-threshold",
+            type=int,
+            default=default,
+            help=f"[{default=}] if we get this many (or more) corrupt packets "
+            "(e.g. index too far ahead or checksum unverified), we'll ask the "
+            "other side to start retransmitting from the last packet index we "
+            "properly received."
+        )
+        default = 2.
+        p.add_argument(
+            "-w",
+            "--handshake-interval",
+            type=float,
+            default=default,
+            help=f"[{default=}] how much to wait (in seconds) after each handshake "
+            "stage so the other side has time to see our responses."
+        )
+        p.add_argument(
+            "-W",
+            "--position",
+            type=str,
+            help="optional initial window position represented as \"x,y\" "
+            "(example: 25,100)"
+        )
+
+    parser_client.add_argument(
         "-p",
         "--port",
+        required=True,
         type=int,
         help="local SOCKS5 proxy server port in client mode"
     )
     default = 256
-    parser.add_argument(
-        "-b",
+    parser_client.add_argument(
+        "-s",
         "--bufsize",
         type=int,
         default=default,
         help=f"[{default=}] relay buffer size in client mode"
     )
-    default = LogLevel.from_int(goofycommon.log_level)
-    parser.add_argument(
-        "-l",
-        "--log-level",
-        type=LogLevel,
-        default=default,
-        help=f"[{default=}] one of: debug, info, warning, error, fatal"
-    )
-    parser.add_argument(
-        "-L",
-        "--log-file",
+
+    default = ADDRESS_FILTER_LAN
+    parser_server.add_argument(
+        "-F",
+        "--address-filter",
         type=str,
-        help="optional path to a log file, e.g. 'log.txt'"
+        default=default,
+        help=f"[{default=}] address filter for remote connections. defaults to "
+        "LAN addresses. use command filter-help to learn about the format."
     )
-    parser.add_argument(
-        "--no-color",
+    parser_server.add_argument(
+        "-a",
+        "--address-filter-allow",
         action="store_true",
-        help="disable terminal colors"
+        help="if disabled (default), all remote connections matching "
+        "--address-filter will be blocked. if enabled, all connections will be "
+        "blocked except ones matching --address-filter."
     )
+
+    default = ""
+    parser_client.add_argument(
+        "-F",
+        "--address-filter",
+        type=str,
+        default=default,
+        help=f"[{default=}] address filter for both direct (bypassed) and "
+        "proxied connections. use command filter-help to learn about the "
+        "format."
+    )
+    parser_client.add_argument(
+        "-a",
+        "--address-filter-allow",
+        action="store_true",
+        help="if disabled (default), all remote connections (direct or "
+        "proxied) matching --address-filter filter will be blocked. if "
+        "enabled, all connections will be blocked except ones matching "
+        "--address-filter."
+    )
+    default = ADDRESS_FILTER_LAN
+    parser_client.add_argument(
+        "-b",
+        "--bypass-filter",
+        type=str,
+        default=default,
+        help=f"[{default=}] address filter for direct connections. defaults to "
+        "LAN addresses. use command filter-help to learn about the format."
+    )
+    parser_client.add_argument(
+        "-B",
+        "--bypass-filter-reverse",
+        action="store_true",
+        help="if disabled (default), addresses matching --bypass-filter will "
+        "use direct connections and other addresses will be proxied. if "
+        "enabled, only addresses matching --bypass-filter will be proxied and "
+        "the rest will use direct connections."
+    )
+
+    for p in (
+        parser_server,
+        parser_client,
+        parser_chat,
+        parser_list_monitors,
+        parser_filter_help
+    ):
+        default = LogLevel.from_int(goofycommon.log_level)
+        p.add_argument(
+            "-l",
+            "--log-level",
+            type=LogLevel,
+            default=default,
+            help=f"[{default=}] one of: debug, info, warning, error, fatal"
+        )
+        p.add_argument(
+            "-L",
+            "--log-file",
+            type=str,
+            help="optional path to a log file, e.g. 'log.txt'"
+        )
+        p.add_argument(
+            "--no-color",
+            action="store_true",
+            help="disable terminal colors"
+        )
 
     # parse
     args = parser.parse_args()
