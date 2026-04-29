@@ -185,7 +185,7 @@ def main():
     )
     parser_delete_acc = subparsers.add_parser(
         "delete-acc",
-        help="delete WsIo user account"
+        help="delete WsIo user account."
     )
     parser_filter_help = subparsers.add_parser(
         "filter-help",
