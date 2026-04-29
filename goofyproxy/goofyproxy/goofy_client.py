@@ -7,6 +7,7 @@ import logging
 import random
 import ipaddress
 
+from .address_filter import *
 from .goofyio import *
 from .common import *
 
@@ -109,9 +110,30 @@ class GoofyClient:
             interval in seconds for the control thread to send all queued
             outgoing packets and relay data from local clients to the server.
 
+        address_filter (str):
+            address filter for both bypassed (direct) and proxied connections.
+            see `address_filter.py` for more details on the format.
+
+        address_filter_type (AddressFilterType):
+            if set to `AddressFilterType.Allow`, will only allow connections
+            (direct or proxied) to addresses matching `address_filter`. if set
+            to `AddressFilterType.Block`, will block connections to addresses
+            matching `address_filter`.
+
+        bypass_filter (str):
+            address filter for direct connections. see `address_filter.py` for
+            more details on the format.
+
+        bypass_filter_type (AddressFilterType):
+            if set to `AddressFilterType.Allow`, will only bypass addresses
+            matching `bypass_filter`. if set to `AddressFilterType.Block`, will
+            bypass every address except ones matching `bypass_filter`.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
+
+    _log: logging.Logger
 
     io: GoofyIo
     host: str
@@ -123,8 +145,10 @@ class GoofyClient:
     udp_timeout: float
     poll_interval: float
     send_interval: float
-
-    _log: logging.Logger
+    address_filter: str
+    address_filter_type: AddressFilterType
+    bypass_filter: str
+    bypass_filter_type: AddressFilterType
 
     _server_sock: socket.socket | None = None
     _running: bool = False
@@ -194,19 +218,28 @@ class GoofyClient:
         udp_timeout: float = 60.0,
         poll_interval: float = .01,
         send_interval: float = .005,
+        address_filter: str = "",
+        address_filter_type: AddressFilterType = AddressFilterType.Block,
+        bypass_filter: str = ADDRESS_FILTER_LAN,
+        bypass_filter_type: AddressFilterType = AddressFilterType.Allow,
         log_level: int | None = None
     ) -> None:
+        self._log = make_logger(f"goofy client", log_level)
+
         self.io = io
         self.host = host
-        self.port = port
-        self.buf_size = buf_size
-        self.backlog = backlog
-        self.timeout = timeout
-        self.bind_timeout = bind_timeout
-        self.udp_timeout = udp_timeout
-        self.poll_interval = poll_interval
-        self.send_interval = send_interval
-        self._log = make_logger(f"goofy client", log_level)
+        self.port = int(port)
+        self.buf_size = int(buf_size)
+        self.backlog = int(backlog)
+        self.timeout = float(timeout)
+        self.bind_timeout = float(bind_timeout)
+        self.udp_timeout = float(udp_timeout)
+        self.poll_interval = float(poll_interval)
+        self.send_interval = float(send_interval)
+        self.address_filter = address_filter
+        self.address_filter_type = address_filter_type
+        self.bypass_filter = bypass_filter
+        self.bypass_filter_type = bypass_filter_type
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()
@@ -333,8 +366,37 @@ class GoofyClient:
                 f"[{cmd_name}] {threading.current_thread().name}"
 
             if cmd == CMD_CONNECT:
-                self._log.info(cmd_name)
-                self._cmd_connect(client, atyp, dst_host, dst_port)
+                dst_addr = f"{dst_host}:{dst_port}"
+                if is_address_allowed(
+                    dst_addr,
+                    self.address_filter,
+                    self.address_filter_type
+                ):
+                    if is_address_allowed(
+                        dst_addr,
+                        self.bypass_filter,
+                        self.bypass_filter_type
+                    ):
+                        self._log.warning(
+                            f"FILTRES: bypass {dst_addr}"
+                        )
+                        # bypass
+                        self._log.info(f"{cmd_name} (direct / bypassed)")
+                        self._cmd_connect_direct(
+                            client, atyp, dst_host, dst_port
+                        )
+                    else:
+                        self._log.warning(
+                            f"FILTRES: proxy {dst_addr}"
+                        )
+                        # proxy
+                        self._log.info(cmd_name)
+                        self._cmd_connect(client, atyp, dst_host, dst_port)
+                else:
+                    self._log.warning(
+                        f"FILTRES: block {dst_addr}"
+                    )
+                    self._send_error(client, REP_CONN_REFUSED)
             elif cmd == CMD_BIND:
                 self._log.info(cmd_name)
                 self._cmd_bind(client, atyp, dst_host, dst_port)
@@ -524,8 +586,93 @@ class GoofyClient:
         sock.last_io_time = time.time()
         sock.lock.release()
         self._log.debug(
-            f"relay planned: local client <-> {dst_host}:{dst_port}"
+            f"relay planned: {dst_host}:{dst_port}"
         )
+
+    def _cmd_connect_direct(
+        self,
+        client: socket.socket,
+        atyp: int,
+        dst_host: str,
+        dst_port: int,
+    ) -> None:
+        """
+        CONNECT: establish a TCP connection to the target and relay data. uses
+        a direct connection instead of proxying through the goofy server.
+        """
+
+        # resolve domain names to an IP address
+        try:
+            info = socket.getaddrinfo(
+                dst_host,
+                dst_port,
+                type=socket.SOCK_STREAM
+            )
+            if not info:
+                raise OSError("address resolution failed")
+            family, _, _, _, sockaddr = info[0]
+            resolved_ip = sockaddr[0]
+        except OSError as e:
+            self._send_error(client, REP_HOST_UNREACHABLE)
+            raise e
+
+        # connect to the target address
+        target = socket.socket(family, socket.SOCK_STREAM)
+        target.settimeout(self.timeout)
+        try:
+            target.connect(sockaddr)
+        except ConnectionRefusedError:
+            close_socket(target)
+            self._send_error(client, REP_CONN_REFUSED)
+            return
+        except OSError as e:
+            close_socket(target)
+            self._send_error(client, REP_HOST_UNREACHABLE)
+            raise e
+
+        # inform the client which local address we bound to
+        bind_host, bind_port = target.getsockname()[:2]
+        self._send_reply(client, REP_SUCCESS, bind_host, bind_port)
+
+        # direct relay
+        self._log.debug(
+            f"CONNECT direct relaying: {dst_host}:{dst_port}"
+        )
+        try:
+            self._direct_relay(client, target)
+        finally:
+            close_socket(client)
+            close_socket(target)
+
+    def _direct_relay(
+        self,
+        a: socket.socket,
+        b: socket.socket
+    ) -> None:
+        """
+        bidirectional TCP relay between two sockets.
+        runs until either side closes the connection or timeout fires.
+        """
+        sockets = [a, b]
+        while True:
+            try:
+                readable, _, exceptional = select.select(
+                    sockets, [], sockets, self.timeout)
+            except (ValueError, OSError):
+                break
+
+            if exceptional or not readable:
+                break
+
+            for src in readable:
+                dst = b if src is a else a
+                try:
+                    data = src.recv(self.buf_size)
+                    if not data:
+                        return
+                    dst.sendall(data)
+                except OSError:
+                    return
 
     def _cmd_bind(
         self,
@@ -710,8 +857,7 @@ class GoofyClient:
         sock.last_io_time = time.time()
         sock.lock.release()
         self._log.debug(
-            f"relay planned: local client <-> "
-            f"{sock.inbound_host}:{sock.inbound_port}"
+            f"relay planned: {sock.inbound_host}:{sock.inbound_port}"
         )
 
     def _udp_relay_loop(
@@ -729,72 +875,122 @@ class GoofyClient:
                     self._log.debug(format_exception(e))
                     break
 
-                # NOTE: a datagram from the SOCKS5 client must have a SOCKS5 UDP
+                # forward datagram from SOCKS client to target.
+                # a datagram from the SOCKS client must have a SOCKS5 UDP
                 # header. we identify the client by matching its IP with the TCP
-                # control socket's IP.
-
-                # skip if the IP doesn't match the client's
-                if sender_addr[0] != client_tcp_host:
-                    continue
-
-                if not data:
-                    continue
-
-                if len(data) < 8:
-                    # too short to be a valid SOCKS5 UDP header
-                    continue
-
-                # remember client's UDP address for the return path
-                relay.client_addr = sender_addr
-
-                rsv, frag, sub_atyp = struct.unpack("!HBB", data[:4])
-
-                if frag != 0:
-                    # fragmentation not supported, drop silently
-                    continue
-
-                offset = 4
-                try:
-                    if sub_atyp == ATYP_IPV4:
-                        target_host = socket.inet_ntoa(
-                            data[offset:offset + 4]
-                        )
-                        offset += 4
-                    elif sub_atyp == ATYP_IPV6:
-                        target_host = socket.inet_ntop(
-                            socket.AF_INET6, data[offset:offset + 16]
-                        )
-                        offset += 16
-                    elif sub_atyp == ATYP_DOMAIN:
-                        dlen = data[offset]
-                        offset += 1
-                        target_host = data[offset:offset + dlen].decode(
-                            "ascii",
-                            errors="replace"
-                        )
-                        offset += dlen
-
-                        # resolve the domain to an IP
-                        target_host = socket.gethostbyname(target_host)
-                    else:
-                        # unknown SOCKS5 address type, drop
+                # control IP.
+                if sender_addr[0] == client_tcp_host:
+                    if not data:
                         continue
 
-                    target_port = struct.unpack(
-                        "!H",
-                        data[offset:offset + 2]
-                    )[0]
-                    offset += 2
-                    payload = data[offset:]
-                except (struct.error, OSError, IndexError):
-                    continue
+                    if len(data) < 8:
+                        # too short to be a valid SOCKS5 UDP header
+                        continue
 
-                self._enqueue_outgoing_packet(GoofyUdpPacket(
-                    udp_relay_id,
-                    target_host,
-                    target_port,
-                    payload
-                ))
+                    # remember client's UDP address for the return path
+                    relay.client_addr = sender_addr
+
+                    rsv, frag, sub_atyp = struct.unpack("!HBB", data[:4])
+
+                    if frag != 0:
+                        # fragmentation not supported, drop silently
+                        continue
+
+                    offset = 4
+                    try:
+                        if sub_atyp == ATYP_IPV4:
+                            target_host = socket.inet_ntoa(
+                                data[offset:offset + 4]
+                            )
+                            offset += 4
+                        elif sub_atyp == ATYP_IPV6:
+                            target_host = socket.inet_ntop(
+                                socket.AF_INET6, data[offset:offset + 16]
+                            )
+                            offset += 16
+                        elif sub_atyp == ATYP_DOMAIN:
+                            dlen = data[offset]
+                            offset += 1
+                            target_host = data[offset:offset + dlen].decode(
+                                "ascii",
+                                errors="replace"
+                            )
+                            offset += dlen
+
+                            # resolve the domain to an IP
+                            target_host = socket.gethostbyname(target_host)
+                        else:
+                            # unknown SOCKS5 address type, drop
+                            continue
+
+                        target_port = struct.unpack(
+                            "!H",
+                            data[offset:offset + 2]
+                        )[0]
+                        offset += 2
+                        payload = data[offset:]
+                    except (struct.error, OSError, IndexError):
+                        continue
+
+                    target_addr = f"{target_host}:{target_port}"
+
+                    # ignore if the target address is blocked
+                    if not is_address_allowed(
+                        target_addr,
+                        self.address_filter,
+                        self.address_filter_type
+                    ):
+                        self._log.warning(
+                            f"FILTRES: block {target_addr}"
+                        )
+                        continue
+
+                    if is_address_allowed(
+                        target_addr,
+                        self.bypass_filter,
+                        self.bypass_filter_type
+                    ):
+                        self._log.warning(
+                            f"FILTRES: bypass {target_addr}"
+                        )
+                        try:
+                            relay.sock.sendto(
+                                payload,
+                                (target_host, target_port)
+                            )
+                        except OSError:
+                            pass
+                    else:
+                        self._log.warning(
+                            f"FILTRES: proxy {target_addr}"
+                        )
+                        # proxy
+                        self._enqueue_outgoing_packet(GoofyUdpPacket(
+                            udp_relay_id,
+                            target_host,
+                            target_port,
+                            payload
+                        ))
+
+                # receive reply datagram from bypassed target, wrap, and forward
+                # to the client.
+                elif relay.client_addr is not None:
+                    target_host, target_port = sender_addr[0], sender_addr[1]
+
+                    # build the SOCKS5 UDP reply header
+                    addr_bytes, atyp = self._encode_socks5_addr(
+                        target_host,
+                        target_port
+                    )
+                    udp_header = (
+                        struct.pack("!HB", 0, 0)  # RSV=0, FRAG=0
+                        + addr_bytes
+                    )
+
+                    try:
+                        relay.sock.sendto(udp_header + data, relay.client_addr)
+                    except OSError:
+                        pass
         except BaseException as e:
             self._log.error(format_exception(e))
 

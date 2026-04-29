@@ -152,24 +152,12 @@ def get_machine_ips():
     return ips
 
 
-def _actually_close_socket(sock: socket.socket):
-    try:
-        sock.close()
-    except:
-        pass
-
-
 def close_socket(sock: socket.socket):
     """
-    close a socket while ignoring exceptions and without blocking the current
-    thread.
+    close a socket, ignoring exceptions.
     """
     try:
-        threading.Thread(
-            target=_actually_close_socket,
-            args=(sock,),
-            daemon=True
-        ).start()
+        sock.close()
     except:
         pass
 

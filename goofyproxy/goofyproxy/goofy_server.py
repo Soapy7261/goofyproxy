@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 import logging
 
+from .address_filter import *
 from .goofyio import *
 from .common import *
 
@@ -39,6 +40,16 @@ class GoofyServer:
             interval in seconds for the send thread to send all queued outgoing
             packets and relay data from remote peers to the goofy client.
 
+        address_filter (str):
+            address filter for remote connections. see `address_filter.py` for
+            more details on the format.
+
+        address_filter_type (AddressFilterType):
+            if set to `AddressFilterType.Allow`, will only allow remote
+            connections to addresses matching `address_filter`. if set to
+            `AddressFilterType.Block`, will block remote connections to addresses
+            matching `address_filter`.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -53,8 +64,11 @@ class GoofyServer:
     bind_timeout: float = 60.
     udp_timeout: float = 60.
 
+    _log: logging.Logger
+
     send_interval: float
-    log: logging.Logger
+    address_filter: str
+    address_filter_type: AddressFilterType
 
     _running: bool = False
 
@@ -102,11 +116,16 @@ class GoofyServer:
         self,
         io: GoofyIo,
         send_interval: float = .005,
+        address_filter: str = ADDRESS_FILTER_LAN,
+        address_filter_type: AddressFilterType = AddressFilterType.Block,
         log_level: int | None = None
     ) -> None:
+        self._log = make_logger(f"goofy server", log_level)
+
         self.io = io
-        self.send_interval = send_interval
-        self.log = make_logger(f"goofy server", log_level)
+        self.send_interval = float(send_interval)
+        self.address_filter = address_filter
+        self.address_filter_type = address_filter_type
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()
@@ -119,7 +138,7 @@ class GoofyServer:
 
         sockets_locked = False
         try:
-            self.log.info("waiting for handshake question from the client")
+            self._log.info("waiting for handshake question from the client")
 
             # handshake: receive question followed by the client's version
             question_len = self.io.receive(1)[0]
@@ -133,7 +152,7 @@ class GoofyServer:
                     self.io.send(GOOFY_VERSION.to_bytes(4) + b"\0")
                 except Exception:
                     pass
-                self.log.fatal(
+                self._log.fatal(
                     f"client version ({client_version}) is older than the "
                     f"minimum supported ({GOOFY_MIN_CLIENT_VERSION})."
                 )
@@ -151,13 +170,13 @@ class GoofyServer:
             # handshake: receive and verify welcome byte
             welcome_byte = self.io.receive(1)[0]
             if welcome_byte != correct_welcome_byte:
-                self.log.fatal(
+                self._log.fatal(
                     f"handshake welcome byte was incorrect (expected "
                     f"{correct_welcome_byte:02X} but got {welcome_byte:02X})."
                 )
                 self.stop()
                 return
-            self.log.info("goofy proxy handshake was successful")
+            self._log.info("goofy proxy handshake was successful")
 
             self._running = True
 
@@ -187,16 +206,32 @@ class GoofyServer:
                     self.bind_timeout = packet.bind_timeout
                     self.udp_timeout = packet.udp_timeout
                 elif isinstance(packet, GoofyCommandOpenSocket):
-                    t = threading.Thread(
-                        target=self._cmd_open_socket,
+                    addr = f"{packet.dst_host}:{packet.dst_port}"
+                    if is_address_allowed(
+                        addr,
+                        address_filter,
+                        address_filter_type
+                    ):
+                        self._log.warning(
+                            f"FILTRES: allow {addr}"
+                        )
+                        t = threading.Thread(
+                            target=self._cmd_open_socket,
 
-                        name=f"[open {packet.dst_host}:{packet.dst_port}] "
-                        f"{packet.socket_id_u32}",
+                            name=f"[open {addr}] {packet.socket_id_u32}",
 
-                        args=(packet,),
-                        daemon=True,
-                    )
-                    t.start()
+                            args=(packet,),
+                            daemon=True,
+                        )
+                        t.start()
+                    else:
+                        self._log.warning(
+                            f"FILTRES: block {addr}"
+                        )
+                        self._enqueue_outgoing_packet(GoofyEventSocketStatus(
+                            packet.socket_id_u32,
+                            GoofySocketStatus.FailedToOpenConnRefused
+                        ))
                 elif isinstance(packet, GoofyCommandBind):
                     t = threading.Thread(
                         target=self._cmd_bind,
@@ -272,7 +307,7 @@ class GoofyServer:
 
                     self._udp_relays_lock.release()
                 else:
-                    self.log.warning(
+                    self._log.warning(
                         f"received unexpected packet type {type(packet)}"
                     )
 
@@ -281,7 +316,7 @@ class GoofyServer:
         except BaseException as e:
             if sockets_locked:
                 self._sockets_lock.release()
-            self.log.fatal(format_exception(e))
+            self._log.fatal(format_exception(e))
         finally:
             self.stop()
 
@@ -293,11 +328,11 @@ class GoofyServer:
             return
 
         self._running = False
-        self.log.info("stopped.")
+        self._log.info("stopped.")
 
     def _cmd_open_socket(self, packet: GoofyCommandOpenSocket):
         try:
-            self.log.info("connecting")
+            self._log.info("connecting")
 
             # resolve domain names to an IP address
             try:
@@ -361,16 +396,16 @@ class GoofyServer:
             sock.relaying = True
             sock.last_io_time = time.time()
             sock.lock.release()
-            self.log.debug(
+            self._log.debug(
                 f"relay planned: {packet.dst_host}:{packet.dst_port} "
                 f"<-> goofy client"
             )
         except BaseException as e:
-            self.log.error(format_exception(e))
+            self._log.error(format_exception(e))
 
     def _cmd_bind(self, packet: GoofyCommandBind):
         try:
-            self.log.info("binding")
+            self._log.info("binding")
 
             bind_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             bind_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -398,14 +433,32 @@ class GoofyServer:
                 bind_port
             ))
 
-            self.log.debug(f"listening on {bind_host}:{bind_port}")
+            self._log.debug(f"listening on {bind_host}:{bind_port}")
 
             # wait for the expected remote peer to connect
             try:
-                remote_sock, remote_addr = bind_sock.accept()
-                remote_sock.settimeout(self.timeout)
-                remote_host = remote_addr[0]
-                remote_port = remote_addr[1]
+                start_time = time.time()
+                while True:
+                    remote_sock, remote_addr = bind_sock.accept()
+                    remote_sock.settimeout(self.timeout)
+                    remote_host = remote_addr[0]
+                    remote_port = remote_addr[1]
+
+                    if is_address_allowed(
+                        f"{remote_host}:{remote_port}",
+                        self.address_filter,
+                        self.address_filter_type
+                    ):
+                        self._log.warning(
+                            f"FILTRES: allow {remote_host}:{remote_port}"
+                        )
+                        break
+                    elif time.time() - start_time > self.bind_timeout:
+                        raise TimeoutError()
+
+                    self._log.warning(
+                        f"FILTRES: block {remote_host}:{remote_port}"
+                    )
             except OSError as e:
                 close_socket(bind_sock)
 
@@ -415,7 +468,7 @@ class GoofyServer:
 
                 raise e
 
-            self.log.debug(
+            self._log.debug(
                 f"inbound connection from {remote_host}:{remote_port}"
             )
 
@@ -438,17 +491,17 @@ class GoofyServer:
             sock.relaying = True
             sock.last_io_time = time.time()
             sock.lock.release()
-            self.log.debug(
+            self._log.debug(
                 f"relay planned: {remote_host}:{remote_port} <-> goofy client"
             )
         except BaseException as e:
-            self.log.error(format_exception(e))
+            self._log.error(format_exception(e))
 
     def _cmd_udp_relay(self, packet: GoofyCommandOpenUdpRelay):
         udp_sock: socket.socket | None = None
         relay: GoofyServerUdpRelay | None = None
         try:
-            self.log.info("starting UDP relay")
+            self._log.info("starting UDP relay")
 
             # open the UDP relay socket on a random port
             udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -476,12 +529,25 @@ class GoofyServer:
                     data, sender_addr = udp_sock.recvfrom(65535)
                 except OSError as e:
                     # timeout or socket closed
-                    self.log.debug(format_exception(e))
+                    self._log.debug(format_exception(e))
                     break
 
                 if not data:
                     continue
 
+                if not is_address_allowed(
+                    f"{sender_addr[0]}:{sender_addr[1]}",
+                    self.address_filter,
+                    self.address_filter_type
+                ):
+                    self._log.warning(
+                        f"FILTRES: block {sender_addr[0]}:{sender_addr[1]}"
+                    )
+                    continue
+
+                self._log.warning(
+                    f"FILTRES: allow {sender_addr[0]}:{sender_addr[1]}"
+                )
                 self._enqueue_outgoing_packet(GoofyUdpPacket(
                     packet.udp_relay_id_u16,
                     sender_addr[0],
@@ -489,9 +555,9 @@ class GoofyServer:
                     data
                 ))
 
-            self.log.debug("UDP relay session ended")
+            self._log.debug("UDP relay session ended")
         except BaseException as e:
-            self.log.error(format_exception(e))
+            self._log.error(format_exception(e))
         finally:
             if udp_sock is not None:
                 close_socket(udp_sock)
@@ -567,7 +633,7 @@ class GoofyServer:
         except BaseException as e:
             if sockets_locked:
                 self._sockets_lock.release()
-            self.log.fatal(format_exception(e))
+            self._log.fatal(format_exception(e))
             self.stop()
 
     def _enqueue_outgoing_packet(self, packet: GoofyPacket):

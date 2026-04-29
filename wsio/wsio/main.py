@@ -2,17 +2,16 @@ import argparse
 from enum import StrEnum
 from typing import Self
 
-from goofyproxy import GoofyServer, GoofyClient
+from goofyproxy import GoofyServer, GoofyClient, AddressFilterType, \
+    ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN
 from goofyproxy.common import *
 
 from wsio import WsIo, delete_account
 
 
 def run(args: argparse.Namespace):
-    if args.command == "rules-help":
-        print(
-            "blacklist rules help"
-        )
+    if args.command == "filter-help":
+        print(ADDRESS_FILTER_HELP)
         return
 
     if args.command == "delete-acc":
@@ -40,7 +39,11 @@ def run(args: argparse.Namespace):
     if args.command == "server":
         GoofyServer(
             gio,
-            send_interval=min(.05, gio.interval_min)
+            send_interval=min(.05, gio.interval_min),
+            address_filter=args.address_filter,
+
+            address_filter_type=AddressFilterType.Allow
+            if args.address_filter_allow else AddressFilterType.Block,
         )
     elif args.command == "client":
         GoofyClient(
@@ -49,7 +52,16 @@ def run(args: argparse.Namespace):
             port=args.port,
             buf_size=args.bufsize,
             poll_interval=min(.05, gio.interval_min),
-            send_interval=min(.05, gio.interval_min)
+            send_interval=min(.05, gio.interval_min),
+            address_filter=args.address_filter,
+
+            address_filter_type=AddressFilterType.Allow
+            if args.address_filter_allow else AddressFilterType.Block,
+
+            bypass_filter=args.bypass_filter,
+
+            bypass_filter_type=AddressFilterType.Block
+            if args.bypass_filter_reverse else AddressFilterType.Allow,
         )
     else:
         print("invalid mode")
@@ -123,9 +135,9 @@ def main():
         "delete-acc",
         help="delete WsIo user account"
     )
-    parser_rules_help = subparsers.add_parser(
-        "rules-help",
-        help="print a detailed help message on GoofyServer blacklist rules."
+    parser_filter_help = subparsers.add_parser(
+        "filter-help",
+        help="print a detailed help message on address filter patterns."
     )
 
     for p in (parser_server, parser_client, parser_delete_acc):
@@ -190,11 +202,19 @@ def main():
             "the send-receive loop."
         )
         p.add_argument(
-            "-f",
+            "-q",
             "--no-warmup",
             action="store_true",
             help="disable warm-up which sends a few dummy requests to the server "
             "with random delays between them before starting or waiting for a call."
+        )
+
+    for p in (parser_server, parser_client, parser_delete_acc):
+        p.add_argument(
+            "-k",
+            "--no-ssl-verify",
+            action="store_true",
+            help="disable SSL certificate verification (not recommended)."
         )
 
     parser_client.add_argument(
@@ -206,26 +226,73 @@ def main():
     )
     default = 4096
     parser_client.add_argument(
-        "-b",
+        "-s",
         "--bufsize",
         type=int,
         default=default,
         help=f"[{default=}] relay buffer size in bytes"
     )
 
-    for p in (parser_server, parser_client, parser_delete_acc):
-        p.add_argument(
-            "-k",
-            "--no-ssl-verify",
-            action="store_true",
-            help="disable SSL certificate verification (not recommended)."
-        )
+    default = ADDRESS_FILTER_LAN
+    parser_server.add_argument(
+        "-f",
+        "--address-filter",
+        type=str,
+        default=default,
+        help=f"[{default=}] address filter for remote connections. defaults to "
+        "LAN addresses. use command filter-help to learn about the format."
+    )
+    parser_server.add_argument(
+        "-a",
+        "--address-filter-allow",
+        action="store_true",
+        help="if disabled (default), all remote connections matching the "
+        "address filter will be blocked. if enabled, all connections will be "
+        "blocked except ones matching the address filter."
+    )
+
+    default = ""
+    parser_client.add_argument(
+        "-f",
+        "--address-filter",
+        type=str,
+        default=default,
+        help=f"[{default=}] address filter for both direct (bypassed) and "
+        "proxied connections. use command filter-help to learn about the "
+        "format."
+    )
+    parser_client.add_argument(
+        "-a",
+        "--address-filter-allow",
+        action="store_true",
+        help="if disabled (default), all remote connections (direct or "
+        "proxied) matching the address filter will be blocked. if enabled, all "
+        "connections will be blocked except ones matching the address filter."
+    )
+    default = ADDRESS_FILTER_LAN
+    parser_client.add_argument(
+        "-b",
+        "--bypass-filter",
+        type=str,
+        default=default,
+        help=f"[{default=}] address filter for direct connections. defaults to "
+        "LAN addresses. use command filter-help to learn about the format."
+    )
+    parser_client.add_argument(
+        "-B",
+        "--bypass-filter-reverse",
+        action="store_true",
+        help="if disabled (default), addresses matching the bypass filter will "
+        "use direct connections and other addresses will be proxied. if "
+        "enabled, only addresses matching the bypass filter will be proxied "
+        "and the rest will use direct connections."
+    )
 
     for p in (
         parser_server,
         parser_client,
         parser_delete_acc,
-        parser_rules_help
+        parser_filter_help
     ):
         p.add_argument(
             "-l",
