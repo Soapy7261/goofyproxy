@@ -21,18 +21,18 @@ software-defined radio dongle, the list goes on!
 
 Now let's see what this project provides.
 
-## goofyproxy
+# goofyproxy
 
 [goofyproxy](./goofyproxy) is the base of the project. It provides three
 fundumental classes we can build upon: `GoofyIo`, `GoofyServer` and
 `GoofyClient`.
 
-## WsIo
+# WsIo
 
-[WsIo](./wsio) transfers data over WsIo calls. See [WsIo Server](./wsio-server)
-for more details.
+[WsIo](./wsio) uses a [WsIo Server](./wsio-server) to transfer bytes through
+"binary calls" and runs goofyproxy on top of that.
 
-## VideoIo
+# VideoIo
 
 [VideoIo](./videoio) allows data transfer over video calls and runs goofyproxy
 on top of that.
