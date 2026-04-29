@@ -36,9 +36,9 @@ const httpServer = http.createServer((req: IncomingMessage, res: ServerResponse)
 });
 
 // returns authResult ("ok" if successful) and userId.
-async function authenticate(auth_code_base64: string): Promise<{ authResult: string, userId: string }> {
+async function authenticate(authCodeBase64: string): Promise<{ authResult: string, userId: string }> {
     // Decode auth
-    const authData = decodeAuth(auth_code_base64);
+    const authData = decodeAuth(authCodeBase64);
     if (!authData) {
         return { authResult: 'failed to decode auth code', userId: '' };
     }
