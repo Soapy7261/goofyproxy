@@ -54,6 +54,8 @@ class GoofyServer:
             logging level (e.g. `logging.INFO`)
     """
 
+    _log: logging.Logger
+
     io: GoofyIo
 
     # these limits (buffer size and timeouts) are typically overridden by the
@@ -63,8 +65,6 @@ class GoofyServer:
     timeout: float = 60.
     bind_timeout: float = 60.
     udp_timeout: float = 60.
-
-    _log: logging.Logger
 
     send_interval: float
     address_filter: str
@@ -120,6 +120,8 @@ class GoofyServer:
         address_filter_type: AddressFilterType = AddressFilterType.Block,
         log_level: int | None = None
     ) -> None:
+        global keyboard_interrupt
+
         self._log = make_logger(f"goofy server", log_level)
 
         self.io = io
@@ -307,11 +309,13 @@ class GoofyServer:
 
                 self._sockets_lock.release()
                 sockets_locked = False
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
         except BaseException as e:
-            if sockets_locked:
-                self._sockets_lock.release()
             self._log.fatal(format_exception(e))
         finally:
+            if sockets_locked:
+                self._sockets_lock.release()
             self.stop()
 
     def running(self) -> bool:
@@ -325,6 +329,7 @@ class GoofyServer:
         self._log.info("stopped.")
 
     def _cmd_open_socket(self, packet: GoofyCommandOpenSocket):
+        global keyboard_interrupt
         try:
             self._log.info("connecting")
 
@@ -394,10 +399,14 @@ class GoofyServer:
                 f"relay planned: {packet.dst_host}:{packet.dst_port} "
                 f"<-> goofy client"
             )
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
+            self.stop()
         except BaseException as e:
             self._log.error(format_exception(e))
 
     def _cmd_bind(self, packet: GoofyCommandBind):
+        global keyboard_interrupt
         try:
             self._log.info("binding")
 
@@ -481,10 +490,15 @@ class GoofyServer:
             self._log.debug(
                 f"relay planned: {remote_host}:{remote_port} <-> goofy client"
             )
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
+            self.stop()
         except BaseException as e:
             self._log.error(format_exception(e))
 
     def _cmd_udp_relay(self, packet: GoofyCommandOpenUdpRelay):
+        global keyboard_interrupt
+
         udp_sock: socket.socket | None = None
         relay: GoofyServerUdpRelay | None = None
         try:
@@ -537,6 +551,8 @@ class GoofyServer:
                 ))
 
             self._log.debug("UDP relay session ended")
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
         except BaseException as e:
             self._log.error(format_exception(e))
         finally:
@@ -549,7 +565,12 @@ class GoofyServer:
             self._udp_relays.pop(packet.udp_relay_id_u16, None)
             self._udp_relays_lock.release()
 
+            if keyboard_interrupt:
+                self.stop()
+
     def _send_thread_run(self):
+        global keyboard_interrupt
+
         sockets_locked = False
         try:
             while self._running:
@@ -614,7 +635,12 @@ class GoofyServer:
         except BaseException as e:
             if sockets_locked:
                 self._sockets_lock.release()
-            self._log.fatal(format_exception(e))
+
+            if isinstance(e, KeyboardInterrupt):
+                keyboard_interrupt = e
+            else:
+                self._log.fatal(format_exception(e))
+
             self.stop()
 
     def _enqueue_outgoing_packet(self, packet: GoofyPacket):

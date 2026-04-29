@@ -54,18 +54,27 @@ class Socks5Server:
     """
     a SOCKS5 proxy server supporting CONNECT, BIND, and UDP ASSOCIATE.
 
-    parameters
-    ----------
-    host        : interface to listen on
-    port        : port to listen on
-    timeout     : socket operation timeout in seconds
-    buf_size    : relay buffer size in bytes
-    backlog     : TCP listen backlog (queue size)
-    bind_timeout: how long (seconds) a BIND socket waits for the inbound
-                  connection from the remote peer.
-    udp_timeout : idle timeout for UDP ASSOCIATE relay threads
-    log_level   : logging level
+    Args:
+        host (str):
+            interface to listen on
+        port (int):
+            port to listen on
+        timeout (float):
+            socket operation timeout in seconds
+        buf_size (int):
+            relay buffer size in bytes
+        backlog (int):
+            TCP listen backlog (queue size)
+        bind_timeout (float):
+            how long (seconds) a BIND socket waits for the inbound
+                      connection from the remote peer.
+        udp_timeout (float):
+            idle timeout for UDP ASSOCIATE relay threads
+        log_level (int):
+            logging level
     """
+
+    _log: logging.Logger
 
     host: str
     port: int
@@ -74,7 +83,6 @@ class Socks5Server:
     backlog: int
     bind_timeout: float
     udp_timeout: float
-    log: logging.Logger
 
     _server_sock: socket.socket | None = None
     _running: bool = False
@@ -88,8 +96,10 @@ class Socks5Server:
         backlog: int = 200,
         bind_timeout: float = 60.0,
         udp_timeout: float = 60.0,
-        log_level: int = LOG_CONFIG["level"]
+        log_level: int | None = None
     ) -> None:
+        self._log = make_logger(f"SOCKS5 server", log_level)
+
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -97,14 +107,13 @@ class Socks5Server:
         self.backlog = backlog
         self.bind_timeout = bind_timeout
         self.udp_timeout = udp_timeout
-        self.log = make_logger(f"SOCKS5 server", log_level)
 
         self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_sock.bind((self.host, self.port))
         self._server_sock.listen(self.backlog)
         self._running = True
-        self.log.info(f"proxy server running on {self.host}:{self.port}")
+        self._log.info(f"proxy server running on {self.host}:{self.port}")
 
         try:
             while self._running:
@@ -113,7 +122,7 @@ class Socks5Server:
                 except OSError:
                     break
 
-                self.log.debug(
+                self._log.debug(
                     f"accepted local client {format_addr(client_addr)}"
                 )
 
@@ -125,7 +134,7 @@ class Socks5Server:
                 )
                 t.start()
         except BaseException as e:
-            self.log.fatal(format_exception(e))
+            self._log.fatal(format_exception(e))
         finally:
             self.stop()
 
@@ -134,7 +143,7 @@ class Socks5Server:
         self._running = False
         if self._server_sock:
             close_socket(self._server_sock)
-        self.log.info("stopped the server")
+        self._log.info("stopped the server")
 
     def _handle_client(
         self,
@@ -160,7 +169,7 @@ class Socks5Server:
             else:
                 cmd_name = f"{cmd} (unsupported)"
 
-            self.log.info(
+            self._log.info(
                 f"command {cmd_name}, dest: {dst_host}:{dst_port}"
             )
 
@@ -173,7 +182,7 @@ class Socks5Server:
             else:
                 self._send_error(client, REP_CMD_NOT_SUPPORTED)
         except Exception as e:
-            self.log.error(format_exception(e))
+            self._log.error(format_exception(e))
         finally:
             close_socket(client)
 
@@ -291,7 +300,7 @@ class Socks5Server:
         bind_host, bind_port = target.getsockname()[:2]
         self._send_reply(client, REP_SUCCESS, bind_host, bind_port)
 
-        self.log.debug(
+        self._log.debug(
             f"CONNECT relaying: local client <-> {dst_host}:{dst_port}"
         )
 
@@ -336,7 +345,7 @@ class Socks5Server:
         # first reply: tell the client where the server is listening
         self._send_reply(client, REP_SUCCESS, bind_host, bind_port)
 
-        self.log.debug(f"BIND listening on {bind_host}:{bind_port}")
+        self._log.debug(f"BIND listening on {bind_host}:{bind_port}")
 
         # wait for the expected remote peer to connect
         try:
@@ -352,7 +361,7 @@ class Socks5Server:
         finally:
             close_socket(bind_sock)
 
-        self.log.debug(
+        self._log.debug(
             f"BIND: inbound connection from {format_addr(remote_addr)}"
         )
 
@@ -408,7 +417,7 @@ class Socks5Server:
         # tell the client which UDP address to send its datagrams to
         self._send_reply(client, REP_SUCCESS, udp_host, udp_port)
 
-        self.log.debug(f"UDP ASSOCIATE relay on {udp_host}:{udp_port}")
+        self._log.debug(f"UDP ASSOCIATE relay on {udp_host}:{udp_port}")
 
         # identify the client's UDP source from the TCP control connection
         client_tcp_host = client.getpeername()[0]
@@ -424,7 +433,7 @@ class Socks5Server:
                     data, sender_addr = udp_sock.recvfrom(65535)
                 except OSError:
                     # timeout or socket closed
-                    self.log.debug("relay closed")
+                    self._log.debug("relay closed")
                     break
 
                 if not data:
@@ -531,7 +540,7 @@ class Socks5Server:
                     break
         finally:
             close_socket(udp_sock)
-            self.log.debug("UDP ASSOCIATE session ended")
+            self._log.debug("UDP ASSOCIATE session ended")
 
     def _relay(
         self,

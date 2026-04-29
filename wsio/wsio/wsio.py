@@ -9,6 +9,7 @@ import random
 import gzip
 import base64
 from typing import NamedTuple
+import logging
 
 import requests
 from http import HTTPStatus
@@ -94,10 +95,18 @@ class WsClient:
             self.ws.send(str(data))
 
     def close(self):
-        """close the connection."""
+        """close the connection gracefully."""
         if self.ws:
             try:
                 self.ws.close()
+            except Exception:
+                pass
+
+    def shutdown(self):
+        """close the underlying socket immediately."""
+        if self.ws:
+            try:
+                self.ws.shutdown()
             except Exception:
                 pass
 
@@ -315,23 +324,30 @@ class WsIo(GoofyIo):
         )
         self._thread.start()
 
+    def __del__(self):
+        self.stop()
+
     def running(self) -> bool:
         return not self._stopping
 
     def stop(self):
+        global keyboard_interrupt
+
         if self._stopping:
             return
+
         self._stopping = True
         try:
-            if self._ws:
-                self._ws.close()
+            self._ws.shutdown()
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
         except Exception:
             pass
 
     def _receive(self, size: int) -> bytes:
         while True:
             if not self.running():
-                raise ConnectionError("not running")
+                raise ConnectionError("WsIo has stopped")
 
             poll_interval = min(.05, self.interval_min)
 
@@ -352,13 +368,14 @@ class WsIo(GoofyIo):
 
     def _send(self, data: bytes):
         if not self.running():
-            raise ConnectionError("not running")
+            raise ConnectionError("WsIo has stopped")
 
         force_acquire(self._out_buf_lock)
         self._out_buf += data
         self._out_buf_lock.release()
 
     def _thread_run(self):
+        global keyboard_interrupt
         try:
             # warm up
             if self.warm_up:
@@ -483,12 +500,17 @@ class WsIo(GoofyIo):
                 self._send_packet_if_needed()
                 if is_ready_to_read(self._ws.ws.sock):
                     self._read_packet()
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
         except BaseException as e:
             self._log.fatal(format_exception(e))
         finally:
             self.stop()
 
     def _send_packet_if_needed(self):
+        if self._stopping:
+            return
+
         force_acquire(self._out_buf_lock)
 
         # use compression if it's worth it
@@ -531,9 +553,14 @@ class WsIo(GoofyIo):
         else:
             data = b"c" + data
 
+        if self._stopping:
+            return
         self._ws.send(data)
 
     def _read_packet(self):
+        if self._stopping:
+            return
+
         data = self._ws.read()
         if isinstance(data, str):
             self._log.warning(f"received text frame: \"{data}\"")

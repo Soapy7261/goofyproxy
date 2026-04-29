@@ -1,9 +1,12 @@
-import argparse
+import time
+import threading
 from enum import StrEnum
 from typing import Self
+import logging
+import argparse
 
 from goofyproxy import GoofyServer, GoofyClient
-from goofyproxy.common import *
+import goofyproxy.common as goofycommon
 
 from videoio import VideoIo
 
@@ -18,7 +21,7 @@ def chat_send(gio: VideoIo):
             msg = input().encode()
             gio.send(len(msg).to_bytes(2) + msg)
     except BaseException as e:
-        logger.error(format_exception(e))
+        goofycommon.root_log.error(goofycommon.format_exception(e))
 
 
 def run(args: argparse.Namespace):
@@ -128,8 +131,6 @@ class LogLevel(StrEnum):
 
 
 def main():
-    global LOG_CONFIG
-
     # command line parser
     parser = argparse.ArgumentParser(
         description="goofy proxy using VideoIo: share your internet connection "
@@ -233,12 +234,13 @@ def main():
         default=default,
         help=f"[{default=}] relay buffer size in client mode"
     )
+    default = LogLevel.from_int(goofycommon.log_level)
     parser.add_argument(
         "-l",
         "--log-level",
         type=LogLevel,
-        default=LogLevel.from_int(LOG_CONFIG["level"]),
-        help="one of: debug, info, warning, error, fatal"
+        default=default,
+        help=f"[{default=}] one of: debug, info, warning, error, fatal"
     )
     parser.add_argument(
         "-L",
@@ -256,25 +258,27 @@ def main():
     args = parser.parse_args()
 
     # logging settings
-    LOG_CONFIG["level"] = args.log_level.to_int()
-    LOG_CONFIG["colorize"] = not args.no_color
+    goofycommon.log_level = args.log_level.to_int()
+    goofycommon.log_colorize = not args.no_color
     if args.log_file:
         try:
             f = open(args.log_file, "a")
-            LOG_CONFIG["file"] = f
+            goofycommon.log_file = f
         except Exception as e:
-            logger.fatal(f"failed to open log file: {format_exception(e)}")
+            goofycommon.root_log.fatal(
+                f"failed to open log file: {goofycommon.format_exception(e)}"
+            )
             return
 
     # run
     try:
         run(args)
     except BaseException as e:
-        logger.fatal(format_exception(e))
+        goofycommon.root_log.fatal(goofycommon.format_exception(e))
     finally:
-        if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
-            LOG_CONFIG["file"].flush()
-            LOG_CONFIG["file"].close()
+        if goofycommon.log_file is not None:
+            goofycommon.log_file.flush()
+            goofycommon.log_file.close()
 
 
 if __name__ == "__main__":

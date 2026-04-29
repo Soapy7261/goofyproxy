@@ -1,10 +1,12 @@
-import argparse
+import time
 from enum import StrEnum
 from typing import Self
+import logging
+import argparse
 
 from goofyproxy import GoofyServer, GoofyClient, AddressFilterType, \
     ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN
-from goofyproxy.common import *
+import goofyproxy.common as goofycommon
 
 from wsio import WsIo, CallerMode, CalleeMode, delete_account
 
@@ -39,61 +41,87 @@ def run(args: argparse.Namespace):
             )
             return
 
-        gio = WsIo(
-            url=args.url,
-            id=args.id,
-            password=args.password,
-            call_mode=CalleeMode(peers, args.peers_block),
-            interval_min=args.interval_min,
-            interval_max=args.interval_max,
-            max_out_packet_size=parse_data_size(args.max_out_packet_size),
-            warm_up=not args.no_warmup,
-            ssl_verify=not args.no_ssl_verify,
-        )
+        while True:
+            gio = WsIo(
+                url=args.url,
+                id=args.id,
+                password=args.password,
+                call_mode=CalleeMode(peers, args.peers_block),
+                interval_min=args.interval_min,
+                interval_max=args.interval_max,
+                max_out_packet_size=goofycommon.parse_data_size(
+                    args.max_out_packet_size
+                ),
+                warm_up=not args.no_warmup,
+                ssl_verify=not args.no_ssl_verify,
+            )
 
-        GoofyServer(
-            gio,
-            send_interval=min(.05, gio.interval_min),
-            address_filter=args.address_filter,
+            GoofyServer(
+                gio,
+                send_interval=min(.05, gio.interval_min),
+                address_filter=args.address_filter,
 
-            address_filter_type=AddressFilterType.Allow
-            if args.address_filter_allow else AddressFilterType.Block,
-        )
+                address_filter_type=AddressFilterType.Allow
+                if args.address_filter_allow else AddressFilterType.Block,
+            )
+
+            gio.stop()
+
+            if goofycommon.keyboard_interrupt is not None:
+                raise goofycommon.keyboard_interrupt
+            if not args.endless:
+                break
+            goofycommon.root_log.info(
+                f"sleeping for {args.endless_wait} s before starting again"
+            )
+            time.sleep(args.endless_wait)
     elif args.command == "client":
-        gio = WsIo(
-            url=args.url,
-            id=args.id,
-            password=args.password,
-            call_mode=CallerMode(args.peer),
-            interval_min=args.interval_min,
-            interval_max=args.interval_max,
-            max_out_packet_size=parse_data_size(args.max_out_packet_size),
-            warm_up=not args.no_warmup,
-            ssl_verify=not args.no_ssl_verify,
-        )
+        while True:
+            gio = WsIo(
+                url=args.url,
+                id=args.id,
+                password=args.password,
+                call_mode=CallerMode(args.peer),
+                interval_min=args.interval_min,
+                interval_max=args.interval_max,
+                max_out_packet_size=goofycommon.parse_data_size(
+                    args.max_out_packet_size
+                ),
+                warm_up=not args.no_warmup,
+                ssl_verify=not args.no_ssl_verify,
+            )
 
-        GoofyClient(
-            gio,
-            host="0.0.0.0",
-            port=args.port,
-            buf_size=args.bufsize,
-            poll_interval=min(.05, gio.interval_min),
-            send_interval=min(.05, gio.interval_min),
-            address_filter=args.address_filter,
+            GoofyClient(
+                gio,
+                host="0.0.0.0",
+                port=args.port,
+                buf_size=args.bufsize,
+                poll_interval=min(.05, gio.interval_min),
+                send_interval=min(.05, gio.interval_min),
+                address_filter=args.address_filter,
 
-            address_filter_type=AddressFilterType.Allow
-            if args.address_filter_allow else AddressFilterType.Block,
+                address_filter_type=AddressFilterType.Allow
+                if args.address_filter_allow else AddressFilterType.Block,
 
-            bypass_filter=args.bypass_filter,
+                bypass_filter=args.bypass_filter,
 
-            bypass_filter_type=AddressFilterType.Block
-            if args.bypass_filter_reverse else AddressFilterType.Allow,
-        )
+                bypass_filter_type=AddressFilterType.Block
+                if args.bypass_filter_reverse else AddressFilterType.Allow,
+            )
+
+            gio.stop()
+
+            if goofycommon.keyboard_interrupt is not None:
+                raise goofycommon.keyboard_interrupt
+            if not args.endless:
+                break
+            goofycommon.root_log.info(
+                f"sleeping for {args.endless_wait} s before starting again"
+            )
+            time.sleep(args.endless_wait)
     else:
-        print("invalid mode")
+        print("invalid command")
         return
-
-    gio.stop()
 
 
 class LogLevel(StrEnum):
@@ -132,8 +160,6 @@ class LogLevel(StrEnum):
 
 
 def main():
-    global LOG_CONFIG
-
     # command line parser
 
     parser = argparse.ArgumentParser(
@@ -201,12 +227,44 @@ def main():
         help="if disabled (default), will only accept calls from user IDs "
         "in --peers. if enabled, will accept calls from anyone but --peers."
     )
+
     parser_client.add_argument(
         "-P",
         "--peer",
         required=True,
         type=str,
         help="user ID to call"
+    )
+
+    parser_server.add_argument(
+        "-e",
+        "--endless",
+        action="store_true",
+        help="wait for another WsIo call every time one ends"
+    )
+    default = 2.
+    parser_server.add_argument(
+        "-w",
+        "--endless-wait",
+        type=float,
+        default=default,
+        help=f"[{default=}] how long to sleep in seconds before checking for a "
+        "new incoming call"
+    )
+    parser_client.add_argument(
+        "-e",
+        "--endless",
+        action="store_true",
+        help="call the peer again every time the call ends"
+    )
+    default = 2.
+    parser_client.add_argument(
+        "-w",
+        "--endless-wait",
+        type=float,
+        default=default,
+        help=f"[{default=}] how long to sleep in seconds before calling the "
+        "peer again"
     )
 
     for p in (parser_server, parser_client):
@@ -332,12 +390,13 @@ def main():
         parser_delete_acc,
         parser_filter_help
     ):
+        default = LogLevel.from_int(goofycommon.log_level)
         p.add_argument(
             "-l",
             "--log-level",
             type=LogLevel,
-            default=LogLevel.from_int(LOG_CONFIG["level"]),
-            help="one of: debug, info, warning, error, fatal"
+            default=default,
+            help=f"[{default=}] one of: debug, info, warning, error, fatal"
         )
         p.add_argument(
             "-L",
@@ -355,25 +414,27 @@ def main():
     args = parser.parse_args()
 
     # logging settings
-    LOG_CONFIG["level"] = args.log_level.to_int()
-    LOG_CONFIG["colorize"] = not args.no_color
+    goofycommon.log_level = args.log_level.to_int()
+    goofycommon.log_colorize = not args.no_color
     if args.log_file:
         try:
             f = open(args.log_file, "a")
-            LOG_CONFIG["file"] = f
+            goofycommon.log_file = f
         except Exception as e:
-            logger.fatal(f"failed to open log file: {format_exception(e)}")
+            goofycommon.root_log.fatal(
+                f"failed to open log file: {goofycommon.format_exception(e)}"
+            )
             return
 
     # run
     try:
         run(args)
     except BaseException as e:
-        logger.fatal(format_exception(e))
+        goofycommon.root_log.fatal(goofycommon.format_exception(e))
     finally:
-        if isinstance(LOG_CONFIG["file"], io.TextIOWrapper):
-            LOG_CONFIG["file"].flush()
-            LOG_CONFIG["file"].close()
+        if goofycommon.log_file is not None:
+            goofycommon.log_file.flush()
+            goofycommon.log_file.close()
 
 
 if __name__ == "__main__":

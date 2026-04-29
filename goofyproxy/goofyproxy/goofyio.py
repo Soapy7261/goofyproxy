@@ -1,5 +1,5 @@
 """
-abstraction for data transfer through goofy ahh channels.
+an abstraction for data transfer through goofy ahh channels.
 """
 
 import socket

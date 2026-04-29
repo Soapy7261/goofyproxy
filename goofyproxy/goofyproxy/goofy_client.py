@@ -224,6 +224,8 @@ class GoofyClient:
         bypass_filter_type: AddressFilterType = AddressFilterType.Allow,
         log_level: int | None = None
     ) -> None:
+        global keyboard_interrupt
+
         self._log = make_logger(f"goofy client", log_level)
 
         self.io = io
@@ -306,6 +308,8 @@ class GoofyClient:
                     daemon=True,
                 )
                 t.start()
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
         except BaseException as e:
             self._log.fatal(format_exception(e))
         finally:
@@ -344,6 +348,9 @@ class GoofyClient:
         addr: tuple[str, int]
     ) -> None:
         """entry point for each client thread"""
+
+        global keyboard_interrupt
+
         client.settimeout(self.timeout)
         try:
             # SOCKS5 handshake
@@ -397,9 +404,14 @@ class GoofyClient:
             else:
                 self._log.warning(cmd_name)
                 self._send_error(client, REP_CMD_NOT_SUPPORTED)
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
+
+            close_socket(client)
+            self.stop()
         except BaseException as e:
             self._log.error(format_exception(e))
-        finally:
+
             close_socket(client)
 
     def _socks5_handshake(self, client: socket.socket) -> None:
@@ -857,6 +869,7 @@ class GoofyClient:
         relay: GoofyClientUdpRelay,
         client_tcp_host: str
     ) -> None:
+        global keyboard_interrupt
         try:
             while True:
                 try:
@@ -973,6 +986,9 @@ class GoofyClient:
                         relay.sock.sendto(udp_header + data, relay.client_addr)
                     except OSError:
                         pass
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
+            self.stop()
         except BaseException as e:
             self._log.error(format_exception(e))
 
@@ -1064,6 +1080,8 @@ class GoofyClient:
             self._log.debug("session ended")
 
     def _control_thread_run(self):
+        global keyboard_interrupt
+
         sockets_locked = False
         try:
             self._accepting_clients = False
@@ -1229,17 +1247,24 @@ class GoofyClient:
             if sockets_locked:
                 self._sockets_lock.release()
 
-            self._log.fatal(format_exception(e))
+            if isinstance(e, KeyboardInterrupt):
+                keyboard_interrupt = e
+            else:
+                self._log.fatal(format_exception(e))
 
             try:
                 if self._receive_thread and self._receive_thread.is_alive():
                     self._receive_thread.join()
+            except KeyboardInterrupt as e:
+                keyboard_interrupt = e
             except BaseException:
                 pass
 
             self.stop()
 
     def _receive_thread_run(self):
+        global keyboard_interrupt
+
         sockets_locked = False
         try:
             while self._running:
@@ -1382,7 +1407,12 @@ class GoofyClient:
         except BaseException as e:
             if sockets_locked:
                 self._sockets_lock.release()
-            self._log.fatal(format_exception(e))
+
+            if isinstance(e, KeyboardInterrupt):
+                keyboard_interrupt = e
+            else:
+                self._log.fatal(format_exception(e))
+
             self.stop()
 
     def _enqueue_outgoing_packet(self, packet: GoofyPacket):
