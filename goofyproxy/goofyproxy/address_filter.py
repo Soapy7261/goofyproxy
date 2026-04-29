@@ -7,42 +7,42 @@ an address filter is a semicolon-separated list of patterns
 of the form <host-pattern>:<port-pattern>.
 
 host patterns:
-  *                  -> any host
-  *.example.com      -> example.com and all its subdomains
-  example.com        -> exactly example.com
-  1.2.3.4            -> exact IPv4 address
-  10.0.0.0/8         -> IPv4 CIDR network
-  [::1]              -> exact IPv6 address (must be in
+  *                   : any host
+  *.example.com       : example.com and all its subdomains
+  example.com         : exactly example.com
+  1.2.3.4             : exact IPv4 address
+  10.0.0.0/8          : IPv4 CIDR network
+  [::1]               : exact IPv6 address (must be in
                         brackets because it contains colons)
-  [fc00::]/7         -> IPv6 CIDR network (also in brackets)
+  [fc00::]/7          : IPv6 CIDR network (also in brackets)
 
 port patterns:
-  *                  -> any port
-  1080               -> exact port
-  80,443             -> multiple ports
-  0-442,444-65535    -> comma-separated ranges
+  *                   : any port
+  1080                : exact port
+  80,443              : multiple ports
+  0-442,444-65535     : comma-separated ranges
 
 examples:
-  *.example.com:*    -> example.com and all its subdomains
+  *.example.com:*     : example.com and all its subdomains
                         on any port
-  example.com:*      -> exactly example.com on any port
-  example.com:22     -> exactly example.com on port 22
-  10.0.0.0/8:*       -> IPv4 CIDR network
-  1.2.3.4:*          -> 1.2.3.4 on any port
-  *:1080-1100        -> any host on ports 1080 to 1100
-  *:443,22-80        -> any host on port 443 or range 22-80
-  [2001:db8:3333:4444:5555:6666:7777:8888]:*  -> IPv6 host
-  *:0-442,444-65535  -> any port except 443
-  *:80;*.org:*       -> two semicolon-separated patterns
+  example.com:*       : exactly example.com on any port
+  example.com:22      : exactly example.com on port 22
+  10.0.0.0/8:*        : IPv4 CIDR network
+  1.2.3.4:*           : 1.2.3.4 on any port
+  *:1080-1100         : any host on ports 1080 to 1100
+  *:443,22-80         : any host on port 443 or range 22-80
+  [2001:db8:3333:4444:5555:6666:7777:8888]:* : IPv6 host
+  *:0-442,444-65535   : any port except 443
+  *:80;*.org:*        : two semicolon-separated patterns
 
 bad examples:
-  example.com        -> missing a port pattern!
-  *example.com:*     -> matches exactly '*example.com', not
+  example.com         : missing a port pattern!
+  *example.com:*      : matches exactly '*example.com', not
                         any host ending with 'example.com'.
-  exam*.com:*        -> matches exactly 'exam*.com', not any
+  exam*.com:*         : matches exactly 'exam*.com', not any
                         host with something between 'exam'
                         and '.com'.
-  *:80 *.org:*       -> multiple patterns must be separated
+  *:80 *.org:*        : multiple patterns must be separated
                         by semicolons, not whitespaces.
 """.strip()
 
