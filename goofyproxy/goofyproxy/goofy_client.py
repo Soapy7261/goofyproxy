@@ -639,7 +639,7 @@ class GoofyClient:
 
         # direct relay
         self._log.debug(
-            f"CONNECT direct relaying: {dst_host}:{dst_port}"
+            f"direct relaying: {dst_host}:{dst_port}"
         )
         try:
             self._direct_relay(client, target)
