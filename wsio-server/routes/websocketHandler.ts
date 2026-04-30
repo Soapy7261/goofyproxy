@@ -3,61 +3,179 @@ import { CONFIG } from '../config';
 import { decodeAuth } from '../utils/auth';
 import { validateUserId } from '../utils/validation';
 import { UserService } from '../services/userService';
-import { CallService } from '../services/callService';
 import { IncomingMessage } from 'http';
 import { URL } from 'url';
-import { Mutex } from 'async-mutex';
+import { Mutex, MutexInterface } from 'async-mutex';
 
 const userService = new UserService();
 
-const currentCalls = Array<{ peers: string, timestamp: number }>()
+class Call {
+    user0: string
+    user1: string
+    timestamp: number
+
+    user0Packets: Array<Buffer>
+    user0PacketsMutex: Mutex
+    user1Packets: Array<Buffer>
+    user1PacketsMutex: Mutex
+
+    constructor(user0: string, user1: string, timestamp: number) {
+        if (user0 < user1) {
+            this.user0 = user0
+            this.user1 = user1
+        } else {
+            this.user0 = user1
+            this.user1 = user0
+        }
+        this.timestamp = timestamp
+
+        this.user0Packets = new Array<Buffer>()
+        this.user0PacketsMutex = new Mutex()
+        this.user1Packets = new Array<Buffer>()
+        this.user1PacketsMutex = new Mutex()
+    }
+}
+
+const currentCalls = new Array<Call>()
 const currentCallsMutex = new Mutex();
+
+async function addCall(
+    user0_unsorted: string,
+    user1_unsorted: string,
+    timestamp: number
+): Promise<Call | null> {
+    let user0 = user0_unsorted
+    let user1 = user1_unsorted
+    if (user1_unsorted < user0_unsorted) {
+        user0 = user1_unsorted
+        user1 = user0_unsorted
+    }
+
+    const newCall = new Call(user0, user1, timestamp)
+
+    const release = await currentCallsMutex.acquire();
+
+    let foundSameCall: Call | null = null;
+    for (let i = 0; i < currentCalls.length; i++) {
+        const call = currentCalls[i];
+        if (call.user0 !== user0 || call.user1 !== user1) {
+            continue;
+        }
+
+        if (call.timestamp !== timestamp) {
+            // found a call with the same peers but a different timestamp, can't
+            // add another one!
+            release();
+            return null;
+        } else {
+            foundSameCall = call;
+        }
+    }
+
+    if (foundSameCall !== null) {
+        release()
+        return foundSameCall
+    } else {
+        currentCalls.push(newCall)
+        const addedCall = currentCalls[currentCalls.length - 1]
+        release()
+        return addedCall
+    }
+}
+
+async function removeCall(user0_unsorted: string, user1_unsorted: string) {
+    let user0 = user0_unsorted
+    let user1 = user1_unsorted
+    if (user1_unsorted < user0_unsorted) {
+        user0 = user1_unsorted
+        user1 = user0_unsorted
+    }
+
+    const release = await currentCallsMutex.acquire()
+    for (let i = 0; i < currentCalls.length; i++) {
+        const call = currentCalls[i];
+        if (call.user0 !== user0 || call.user1 !== user1) {
+            continue;
+        }
+        currentCalls.splice(i, 1)
+        i--;
+    }
+    release()
+}
 
 async function startReceiveLoop(
     ws: WebSocket,
-    userId: string,
-    peerId: string,
-    timestamp: number
+    myId: string,
+    theirId: string,
+    theirPackets: Array<Buffer>,
+    theirPakcetsMutex: Mutex
 ): Promise<void> {
-    let inPacketIdx = 1;
     let isActive = true;
-
     const poll = async () => {
         while (isActive && ws.readyState === WebSocket.OPEN) {
+            let release: MutexInterface.Releaser | null = null
             try {
-                const packet = await CallService.readPacketFromPeer(
-                    peerId,
-                    userId,
-                    timestamp,
-                    inPacketIdx
-                );
+                await new Promise(resolve => setTimeout(
+                    resolve,
+                    CONFIG.PACKET_POLL_INTERVAL_MS
+                ));
 
-                if (packet !== null) {
-                    inPacketIdx++;
-                    if (packet.isClose) {
-                        // Close the connection
+                release = await theirPakcetsMutex.acquire();
+                if (theirPackets.length < 1) {
+                    release()
+                    continue;
+                }
+                for (let i = 0; i < theirPackets.length; i++) {
+                    const packet = theirPackets[i];
+
+                    if (packet.byteLength < 1) {
+                        // Empty packet means end of call
+
+                        theirPackets.length = 0
+                        release()
+
                         isActive = false;
-                        await removeCall(userId, peerId)
+                        await removeCall(myId, theirId)
                         ws.terminate()
                         return;
                     }
-                    else if (packet.data !== null) {
-                        // Send binary frame
-                        ws.send(packet.data);
-                    }
-                }
-            } catch (error) {
-                console.error('Error in receive loop:', error);
-            }
 
-            await new Promise(resolve => setTimeout(resolve, CONFIG.PACKET_POLL_INTERVAL_MS));
+                    // Send binary frame
+                    ws.send(packet);
+                }
+                theirPackets.length = 0
+                release()
+            } catch (error) {
+                console.error(
+                    `Error in receive loop (${myId} <- ${theirId}):`,
+                    error
+                );
+
+                if (release !== null) {
+                    try {
+                        release()
+                    } catch { }
+                }
+
+                isActive = false;
+                try {
+                    await removeCall(myId, theirId)
+                } catch { }
+                try {
+                    ws.terminate()
+                } catch { }
+                return;
+            }
         }
     };
 
     await poll();
 }
 
-export async function handleCallConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
+export async function handleCallConnection(
+    ws: WebSocket,
+    req: IncomingMessage
+): Promise<void> {
     const url = new URL(req.url || '', `https://${req.headers.host}`);
     const authParam = url.searchParams.get('auth');
     const peerParam = url.searchParams.get('peer');
@@ -116,7 +234,11 @@ export async function handleCallConnection(ws: WebSocket, req: IncomingMessage):
     const timestamp = Date.now();
 
     // Add incoming call to peer
-    const callAdded = await userService.addIncomingCall(peerParam, userId, timestamp);
+    const callAdded = await userService.addIncomingCall(
+        peerParam,
+        userId,
+        timestamp
+    );
     if (!callAdded) {
         ws.send('peer-not-found');
         ws.close();
@@ -126,27 +248,37 @@ export async function handleCallConnection(ws: WebSocket, req: IncomingMessage):
     // Poll for answer
     const startTime = Date.now();
     let answered = false;
-
     while (Date.now() - startTime < CONFIG.CALL_TIMEOUT_MS) {
-        const peerCalls = await userService.getIncomingCalls(peerParam);
-        const ourCall = peerCalls.find(
-            call => call.caller === userId && call.timestamp === timestamp
+        const ourCall = await userService.getIncomingCall(
+            peerParam,
+            userId,
+            timestamp,
+            false,
+            false
         );
-
         if (!ourCall) {
             // Call was removed
             ws.send('call-failed');
             ws.close();
             return;
         }
-
         if (ourCall.answered) {
             answered = true;
             break;
         }
-
-        await new Promise(resolve => setTimeout(resolve, CONFIG.SLOW_POLL_INTERVAL_MS));
+        await new Promise(
+            resolve => setTimeout(resolve, CONFIG.CALL_ANSWER_POLL_INTERVAL_MS)
+        );
     }
+
+    // Remove the incoming call
+    await userService.getIncomingCall(
+        peerParam,
+        userId,
+        timestamp,
+        false,
+        true
+    );
 
     if (!answered) {
         ws.send('call-failed');
@@ -154,75 +286,22 @@ export async function handleCallConnection(ws: WebSocket, req: IncomingMessage):
         return;
     }
 
-    // Check if userId and peerParam are already in a different call
-    if (!(await addCall(userId, peerParam, timestamp))) {
+    // Add the call and inform the client if userId and peerParam are already in
+    // a different call.
+    const call = await addCall(userId, peerParam, timestamp)
+    if (call === null) {
         ws.send('already-in-call')
         ws.close();
         return;
     }
 
-    // Remove the incoming call
-    await userService.removeIncomingCall(peerParam, userId, timestamp);
-
-    // Delete old packets sent from userId to peerParam
-    await CallService.cleanOutbox(userId, peerParam)
-
-    // Create initial empty packet (packet 0)
-    await CallService.writePacket(userId, peerParam, timestamp, 0, Buffer.alloc(0));
-
-    // Send call-start
-    ws.send('call-start');
-
-    // Wait for peer's initial packet
-    const packetReceived = await CallService.waitForInitialPacket(
-        peerParam,
-        userId,
-        timestamp,
-        CONFIG.CALL_TIMEOUT_MS
-    );
-
-    if (!packetReceived) {
-        ws.close();
-        return;
-    }
-
-    // Start receive loop
-    startReceiveLoop(ws, userId, peerParam, timestamp).catch(console.error);
-
-    // Handle incoming WebSocket messages
-    let outPacketIdx = 1;
-    ws.on('message', async (data: WebSocket.Data) => {
-        if (data instanceof Buffer) {
-            try {
-                await CallService.writePacket(userId, peerParam, timestamp, outPacketIdx, data);
-
-                // Update the inPacketIdx in the receive loop
-                outPacketIdx++;
-            } catch (error) {
-                console.error('Error writing packet:', error);
-            }
-        }
-    });
-
-    // Handle WebSocket close
-    ws.on('close', async () => {
-        try {
-            await CallService.writePacket(
-                userId,
-                peerParam,
-                timestamp,
-                outPacketIdx,
-                Buffer.alloc(0),
-                "-close"
-            );
-            await removeCall(userId, peerParam)
-        } catch (error) {
-            console.error('Error creating close packet:', error);
-        }
-    });
+    await startCall(ws, call, userId);
 }
 
-export async function handlePickupConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
+export async function handlePickupConnection(
+    ws: WebSocket,
+    req: IncomingMessage
+): Promise<void> {
     const url = new URL(req.url || '', `https://${req.headers.host}`);
     const authParam = url.searchParams.get('auth');
     const peerParam = url.searchParams.get('peer');
@@ -278,67 +357,83 @@ export async function handlePickupConnection(ws: WebSocket, req: IncomingMessage
         return;
     }
 
-    // Get incoming calls and find the peer's call
-    const incomingCalls = await userService.getIncomingCalls(userId);
-    const call = incomingCalls.find(c => c.caller === peerParam && !c.answered);
-
-    if (!call) {
+    // Get incoming call from peer
+    const incomingCall = await userService.getIncomingCall(
+        userId,
+        peerParam,
+        null,
+        true,
+        false
+    );
+    if (!incomingCall) {
         ws.send('no-call');
         ws.close();
         return;
     }
+    const timestamp = incomingCall.timestamp;
 
-    // Check if userId and peerParam are already in a different call
-    if (!(await addCall(userId, peerParam, call.timestamp))) {
+    // Add the call and inform the client if userId and peerParam are already in
+    // a different call.
+    const call = await addCall(userId, peerParam, timestamp)
+    if (call === null) {
         ws.send('already-in-call')
         ws.close();
         return;
     }
 
     // Answer the call
-    const answered = await userService.answerCall(userId, peerParam, call.timestamp);
+    const answered = await userService.answerCall(
+        userId,
+        peerParam,
+        call.timestamp
+    );
     if (!answered) {
+        await removeCall(userId, peerParam)
         ws.send('no-call');
         ws.close();
         return;
     }
 
-    const timestamp = call.timestamp;
+    await startCall(ws, call, userId);
+}
 
-    // Delete old packets sent from userId to peerParam
-    await CallService.cleanOutbox(userId, peerParam)
-
-    // Create initial empty packet (packet 0)
-    await CallService.writePacket(userId, peerParam, timestamp, 0, Buffer.alloc(0));
+async function startCall(ws: WebSocket, call: Call, myId: string) {
+    // Make references to our and the other sides' packet array and mutex
+    let myPackets = call.user0Packets
+    let myPakcetsMutex = call.user0PacketsMutex
+    let theirPackets = call.user1Packets
+    let theirPakcetsMutex = call.user1PacketsMutex
+    let theirId = call.user1
+    if (myId === call.user1) {
+        myPackets = call.user1Packets
+        myPakcetsMutex = call.user1PacketsMutex
+        theirPackets = call.user0Packets
+        theirPakcetsMutex = call.user0PacketsMutex
+        theirId = call.user0
+    }
 
     // Send call-start
     ws.send('call-start');
 
-    // Wait for caller's initial packet
-    const packetReceived = await CallService.waitForInitialPacket(
-        peerParam,
-        userId,
-        timestamp,
-        CONFIG.CALL_TIMEOUT_MS
-    );
-
-    if (!packetReceived) {
-        ws.close();
-        return;
-    }
-
     // Start receive loop
-    startReceiveLoop(ws, userId, peerParam, timestamp).catch(console.error);
+    startReceiveLoop(
+        ws,
+        myId,
+        theirId,
+        theirPackets,
+        theirPakcetsMutex
+    ).catch(console.error);
+
 
     // Handle incoming WebSocket messages
-    let outPacketIdx = 1;
     ws.on('message', async (data: WebSocket.Data) => {
-        if (data instanceof Buffer) {
+        if (data instanceof Buffer && data.byteLength > 0) {
             try {
-                await CallService.writePacket(userId, peerParam, timestamp, outPacketIdx, data);
-                outPacketIdx++;
+                const release = await myPakcetsMutex.acquire();
+                myPackets.push(data)
+                release()
             } catch (error) {
-                console.error('Error writing packet:', error);
+                console.error('Failed to write packet:', error);
             }
         }
     });
@@ -346,67 +441,15 @@ export async function handlePickupConnection(ws: WebSocket, req: IncomingMessage
     // Handle WebSocket close
     ws.on('close', async () => {
         try {
-            await CallService.writePacket(
-                userId,
-                peerParam,
-                timestamp,
-                outPacketIdx,
-                Buffer.alloc(0),
-                "-close"
-            );
-            await removeCall(userId, peerParam)
+            // Push empty packet to indicate end of call
+            const release = await myPakcetsMutex.acquire();
+            myPackets.push(Buffer.alloc(0))
+            release()
+
+            // Remove call from current calls
+            await removeCall(myId, theirId)
         } catch (error) {
-            console.error('Error creating close packet:', error);
+            console.error('Failed to end the call:', error);
         }
     });
-}
-
-async function addCall(
-    user1: string,
-    user2: string,
-    timestamp: number
-): Promise<boolean> {
-    const combined = (user1 < user2)
-        ? `${user1} : ${user2}`
-        : `${user2} : ${user1}`
-
-    const release = await currentCallsMutex.acquire();
-
-    let foundSameCall = false;
-    for (let i = 0; i < currentCalls.length; i++) {
-        const call = currentCalls[i];
-        if (call.peers !== combined) {
-            continue;
-        }
-        if (call.timestamp !== timestamp) {
-            release();
-            return false;
-        } else {
-            foundSameCall = true;
-        }
-    }
-
-    if (foundSameCall) {
-        release()
-        return true
-    } else {
-        currentCalls.push({ peers: combined, timestamp: timestamp })
-        release()
-        return true
-    }
-}
-
-async function removeCall(user1: string, user2: string) {
-    const combined = (user1 < user2)
-        ? `${user1} : ${user2}`
-        : `${user2} : ${user1}`
-
-    const release = await currentCallsMutex.acquire()
-    for (let i = 0; i < currentCalls.length; i++) {
-        if (currentCalls[i].peers == combined) {
-            currentCalls.splice(i, 1)
-            i--;
-        }
-    }
-    release()
 }

@@ -113,16 +113,59 @@ export class UserService {
         return true;
     }
 
-    async getIncomingCalls(userId: string): Promise<IncomingCall[]> {
+    async getIncomingCalls(userId: string): Promise<Array<IncomingCall>> {
         const user = await this.getUser(userId);
         if (!user) {
-            return [];
+            return new Array<IncomingCall>();
         }
 
         const sixtySecondsAgo = Date.now() - 60000;
-        return user.incomingCalls.filter(
+        user.incomingCalls = user.incomingCalls.filter(
             call => call.timestamp > sixtySecondsAgo
         );
+        await this.updateUser(user);
+        return user.incomingCalls;
+    }
+
+    async getIncomingCall(
+        userId: string,
+        callerId: string,
+        timestamp: number | null,
+        skip_answered: boolean,
+        remove: boolean
+    ): Promise<IncomingCall | null> {
+        const user = await this.getUser(userId);
+        if (!user) {
+            return null;
+        }
+
+        const sixtySecondsAgo = Date.now() - 60000;
+        user.incomingCalls = user.incomingCalls.filter(
+            call => call.timestamp > sixtySecondsAgo
+        );
+
+        let foundCall: IncomingCall | null = null
+        for (let i = 0; i < user.incomingCalls.length; i++) {
+            const call = user.incomingCalls[i];
+            if (call.caller !== callerId) {
+                continue;
+            }
+            if (timestamp !== null && call.timestamp !== timestamp) {
+                continue;
+            }
+            if (skip_answered && call.answered) {
+                continue;
+            }
+
+            foundCall = call;
+            if (remove) {
+                user.incomingCalls.splice(i, 1)
+                i--;
+            }
+        }
+
+        await this.updateUser(user);
+        return foundCall;
     }
 
     async cleanupOldCalls(userId: string): Promise<void> {
@@ -135,7 +178,6 @@ export class UserService {
         user.incomingCalls = user.incomingCalls.filter(
             call => call.timestamp > sixtySecondsAgo
         );
-
         await this.updateUser(user);
     }
 
@@ -156,18 +198,5 @@ export class UserService {
         user.incomingCalls[callIndex].answered = true;
         await this.updateUser(user);
         return true;
-    }
-
-    async removeIncomingCall(userId: string, callerId: string, timestamp: number): Promise<void> {
-        const user = await this.getUser(userId);
-        if (!user) {
-            return;
-        }
-
-        user.incomingCalls = user.incomingCalls.filter(
-            call => !(call.caller === callerId && call.timestamp === timestamp)
-        );
-
-        await this.updateUser(user);
     }
 }

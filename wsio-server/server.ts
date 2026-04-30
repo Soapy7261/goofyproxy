@@ -195,6 +195,8 @@ const server = https.createServer(sslOptions, async (req: IncomingMessage, res: 
         const incomingCalls = await userService.getIncomingCalls(userId);
         const sixtySecondsAgo = Date.now() - 60000;
 
+        // Only the calls that are not older than 60 seconds and not answered
+        // + remove the answered field.
         const recentCalls = incomingCalls
             .filter(call => call.timestamp > sixtySecondsAgo && !call.answered)
             .map(call => ({
@@ -234,11 +236,13 @@ wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
 });
 
 // Start HTTP server solely for rejecting non-secure connections
-httpServer.listen(CONFIG.HTTP_PORT, () => {
-    console.log(`HTTP server rejecting connections on port ${CONFIG.HTTP_PORT}`);
-});
+if (typeof CONFIG.HTTP_PORT === "number" && CONFIG.HTTP_PORT >= 0) {
+    httpServer.listen(CONFIG.HTTP_PORT, () => {
+        console.log(`HTTP server rejecting connections on port ${CONFIG.HTTP_PORT}`);
+    });
+}
 
-// Start server
+// Start HTTPS (+WSS) server
 server.listen(CONFIG.HTTPS_PORT, () => {
     console.log(`HTTPS server running on port ${CONFIG.HTTPS_PORT}`);
     console.log(`Users directory: ${path.resolve(CONFIG.USERS_DIR)}`);
