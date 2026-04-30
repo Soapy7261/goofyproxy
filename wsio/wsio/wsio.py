@@ -53,7 +53,13 @@ class WsClient:
             "cert_reqs": ssl.CERT_REQUIRED if ssl_verify else ssl.CERT_NONE
         }
 
-        url = url.replace("https://", "wss://").replace("http://", "ws://")
+        http_prefix = "http://"
+        https_prefix = "https://"
+        if url.startswith(https_prefix):
+            url = "wss://" + url[len(https_prefix):]
+        elif url.startswith(http_prefix):
+            url = "ws://" + url[len(http_prefix):]
+
         if params is not None:
             url += "?" + urlencode(params)
 
