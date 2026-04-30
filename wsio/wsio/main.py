@@ -272,7 +272,7 @@ def main():
     )
 
     for p in (parser_server, parser_client):
-        default = .1
+        default = .05
         p.add_argument(
             "-i",
             "--interval-min",
@@ -281,7 +281,7 @@ def main():
             help=f"[{default=}] minimum delay in seconds between each "
             "iteration of the send-receive loop."
         )
-        default = .5
+        default = .25
         p.add_argument(
             "-I",
             "--interval-max",
@@ -290,7 +290,7 @@ def main():
             help=f"[{default=}] maximum delay in seconds between each "
             "iteration of the send-receive loop."
         )
-        default = "512 KiB"
+        default = "128 KiB"
         p.add_argument(
             "-O",
             "--max-out-packet-size",

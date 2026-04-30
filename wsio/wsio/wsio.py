@@ -226,9 +226,9 @@ class WsIo(GoofyIo):
         id: str,
         password: str,
         call_mode: CallerMode | CalleeMode,
-        interval_min: float = .1,
-        interval_max: float = .5,
-        max_out_packet_size: int = 512 * 1024,
+        interval_min: float = .05,
+        interval_max: float = .25,
+        max_out_packet_size: int = 128 * 1024,
         warm_up: bool = True,
         ssl_verify: bool = True,
         n_retries: int = 10,
@@ -396,10 +396,11 @@ class WsIo(GoofyIo):
             # warm up
             if self.warm_up:
                 self._log.info("warming up")
-                n = random.randint(2, 6)
+                n = random.randint(3, 5)
                 for _ in range(n):
-                    time.sleep(.5 + 1.8 * random.random())
+                    time.sleep(.8 + 1.1 * random.random())
                     self._dummy_request("dummy")
+                time.sleep(1. + .2 * random.random())
 
             if isinstance(self.call_mode, CallerMode):
                 # call the peer
