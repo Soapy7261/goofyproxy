@@ -21,9 +21,6 @@ import urllib3
 from goofyproxy import GoofyIo
 from goofyproxy.common import *
 
-N_RETRIES: int = 10
-RETRY_INTERVAL: float = 2.
-
 
 class WsIoError(IOError):
     pass
@@ -183,6 +180,13 @@ class WsIo(GoofyIo):
         ssl_verify (bool):
             enable SSL certificate verification (recommended).
 
+        n_retries (int):
+            how many times to retry when a request to the WsIo server fails.
+
+        retry_interval (float):
+            how long to wait in seconds before retrying a request to the WsIo
+            server.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -198,6 +202,8 @@ class WsIo(GoofyIo):
     max_out_packet_size: int
     warm_up: bool
     ssl_verify: bool
+    n_retries: int
+    retry_interval: float
 
     _auth_code: str
 
@@ -225,6 +231,8 @@ class WsIo(GoofyIo):
         max_out_packet_size: int = 512 * 1024,
         warm_up: bool = True,
         ssl_verify: bool = True,
+        n_retries: int = 10,
+        retry_interval: float = 2.,
         log_level: int | None = None
     ):
         validate_server_url(url)
@@ -275,6 +283,8 @@ class WsIo(GoofyIo):
         self.max_out_packet_size = int(max_out_packet_size)
         self.warm_up = warm_up
         self.ssl_verify = ssl_verify
+        self.n_retries = int(n_retries)
+        self.retry_interval = float(retry_interval)
 
         if self.interval_max < self.interval_min:
             raise ValueError(
@@ -600,10 +610,10 @@ class WsIo(GoofyIo):
             pass
 
     def _request(self, path: str, params: dict) -> requests.Response:
-        for i in range(N_RETRIES + 1):
+        for i in range(self.n_retries + 1):
             try:
                 if i > 0:
-                    time.sleep(RETRY_INTERVAL)
+                    time.sleep(self.retry_interval)
 
                 res = requests.get(
                     f"{self.url}{path}",
@@ -623,7 +633,7 @@ class WsIo(GoofyIo):
                 return res
             except Exception as e:
                 self._log.error(
-                    f"\"/{path}\" failed ({i}/{N_RETRIES}): "
+                    f"\"/{path}\" failed ({i}/{self.n_retries}): "
                     f"{format_exception(e)}"
                 )
         raise ConnectionError(f"too many failures in \"{path}\"")

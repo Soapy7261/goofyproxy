@@ -54,6 +54,8 @@ def run(args: argparse.Namespace):
                 ),
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
+                n_retries=args.retries,
+                retry_interval=args.retry_interval,
             )
 
             GoofyServer(
@@ -89,6 +91,8 @@ def run(args: argparse.Namespace):
                 ),
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
+                n_retries=args.retries,
+                retry_interval=args.retry_interval,
             )
 
             GoofyClient(
@@ -310,6 +314,26 @@ def main():
             "--no-ssl-verify",
             action="store_true",
             help="disable SSL certificate verification (not recommended)."
+        )
+
+    for p in (parser_server, parser_client):
+        default = 10
+        p.add_argument(
+            "-r",
+            "--retries",
+            type=int,
+            default=default,
+            help=f"[{default=}] how many times to retry when a request to the "
+            "WsIo server fails."
+        )
+        default = 2.
+        p.add_argument(
+            "-t",
+            "--retry-interval",
+            type=int,
+            default=default,
+            help=f"[{default=}] how long to wait in seconds before retrying a "
+            "request to the WsIo server."
         )
 
     parser_client.add_argument(
