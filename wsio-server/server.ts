@@ -221,17 +221,26 @@ const server = https.createServer(sslOptions, async (req: IncomingMessage, res: 
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
-    const url = new URL(req.url || '', `https://${req.headers.host}`);
-    const pathname = url.pathname;
+    try {
+        ws.on('error', (error: Error) => {
+            console.error('WebSocket error:', error);
+            ws.terminate();
+        });
 
-    // Handle WebSocket connections
-    if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/call`) {
-        await handleCallConnection(ws, req);
-    } else if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/pickup`) {
-        await handlePickupConnection(ws, req);
-    } else {
-        // Unknown WebSocket path
-        ws.close(1008, 'Unknown path');
+        const url = new URL(req.url || '', `https://${req.headers.host}`);
+        const pathname = url.pathname;
+
+        // Handle WebSocket connections
+        if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/call`) {
+            await handleCallConnection(ws, req);
+        } else if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/pickup`) {
+            await handlePickupConnection(ws, req);
+        } else {
+            // Unknown WebSocket path
+            ws.close(1008, 'Unknown path');
+        }
+    } catch (e) {
+        console.error("Failed to handle WebSocket connection:", e)
     }
 });
 
