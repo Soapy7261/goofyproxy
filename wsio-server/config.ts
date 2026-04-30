@@ -1,8 +1,8 @@
 export const CONFIG = {
-    USERS_DIR: './users',
+    USERS_DIR: './.users',
     DEFAULT_HTML_PATH: './public/index.html',
-    SSL_KEY_PATH: './certs/server.key',
-    SSL_CERT_PATH: './certs/server.crt',
+    SSL_KEY_PATH: './.certs/server.key',
+    SSL_CERT_PATH: './.certs/server.crt',
     WSIO_PATH_IN_REQUEST: '/wsio-carrot',
     HTTPS_PORT: 443,
     HTTP_PORT: 80, // or null to disable the HTTP server

@@ -8,4 +8,6 @@ wheels/
 node_modules/
 .node_modules/
 .debug/
+.certs/
+.users/
 /stuff/**
