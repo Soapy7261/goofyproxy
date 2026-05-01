@@ -3,6 +3,9 @@
 `BincallIo` is a child class of `GoofyIo` that uses a
 [bincall Server](../bincall) to transfer bytes through "binary calls".
 
+The main script (`main.py`) provides a command line program that runs
+[goofyproxy](../goofyproxy) on top of bincall calls.
+
 Run `python ./main.py -h` to see a detailed and human-readable help message.
 
 # Disclaimer
