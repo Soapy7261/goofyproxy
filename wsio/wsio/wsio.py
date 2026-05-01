@@ -632,10 +632,12 @@ class WsIo(GoofyIo):
 
                 if res.status_code != 200:
                     try:
-                        phrase = " " + HTTPStatus(res.status_code).phrase
+                        suffix = f" {HTTPStatus(res.status_code).phrase}"
                     except ValueError:
-                        phrase = ""
-                    raise Exception(f"{res.status_code}{phrase}")
+                        suffix = ""
+                    if res.text:
+                        suffix += f": \"{res.text}\""
+                    raise Exception(f"{res.status_code}{suffix}")
 
                 return res
             except Exception as e:
