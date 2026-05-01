@@ -18,7 +18,9 @@ const defaultHtml = fs.readFileSync(CONFIG.DEFAULT_HTML_PATH, 'utf-8');
 
 // Read SSL certificate and key
 let sslOptions: https.ServerOptions | null = null
-if (CONFIG.SSL_KEY_PATH != null && CONFIG.SSL_CERT_PATH != null) {
+if (CONFIG.HTTPS_PORT != null
+    && CONFIG.SSL_KEY_PATH != null
+    && CONFIG.SSL_CERT_PATH != null) {
     sslOptions = {
         key: fs.readFileSync(CONFIG.SSL_KEY_PATH),
         cert: fs.readFileSync(CONFIG.SSL_CERT_PATH),
