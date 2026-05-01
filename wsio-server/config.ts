@@ -20,7 +20,7 @@ export const CONFIG = {
 
     // if true, the HTTP server will reject requests and ask the client to use
     // HTTPS instead.
-    HTTP_REJECT: false,
+    HTTP_REJECT: true,
 
     CALL_TIMEOUT_MS: 60000,
     CALL_ANSWER_POLL_INTERVAL_MS: 1000,
