@@ -13,29 +13,19 @@ import { handleCallConnection, handlePickupConnection } from './routes/websocket
 
 const userService = new UserService();
 
-// Read SSL certificate and key
-const sslOptions: https.ServerOptions = {
-    key: fs.readFileSync(CONFIG.SSL_KEY_PATH),
-    cert: fs.readFileSync(CONFIG.SSL_CERT_PATH),
-};
-
 // Read default HTML page
 const defaultHtml = fs.readFileSync(CONFIG.DEFAULT_HTML_PATH, 'utf-8');
 
-// Create HTTP server solely for rejecting non-secure connections
-const httpServer = http.createServer((req: IncomingMessage, res: ServerResponse) => {
-    // Forcefully reject all plain HTTP connections
-    res.writeHead(403, {
-        'Content-Type': 'text/plain',
-        'Connection': 'close'
-    });
-    res.end('Please use https:// instead of http://.');
+// Read SSL certificate and key
+let sslOptions: https.ServerOptions | null = null
+if (CONFIG.SSL_KEY_PATH != null && CONFIG.SSL_CERT_PATH != null) {
+    sslOptions = {
+        key: fs.readFileSync(CONFIG.SSL_KEY_PATH),
+        cert: fs.readFileSync(CONFIG.SSL_CERT_PATH),
+    };
+}
 
-    // Immediately destroy the connection to be more aggressive
-    req.destroy();
-});
-
-// returns authResult ("ok" if successful) and userId.
+// Returns authResult ("ok" if successful) and userId.
 async function authenticate(authCodeBase64: string): Promise<{ authResult: string, userId: string }> {
     // Decode auth
     const authData = decodeAuth(authCodeBase64);
@@ -58,13 +48,16 @@ async function authenticate(authCodeBase64: string): Promise<{ authResult: strin
     return { authResult: 'ok', userId: userId };
 }
 
-// Create HTTPS server
-const server = https.createServer(sslOptions, async (req: IncomingMessage, res: ServerResponse) => {
+// Request handler
+async function handleRequest(
+    req: IncomingMessage,
+    res: ServerResponse
+) {
     const url = new URL(req.url || '', `https://${req.headers.host}`);
     const pathname = url.pathname;
 
     // Handle /prepare
-    if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/prepare`) {
+    if (pathname === `${CONFIG.WSIO_API_PATH}/prepare`) {
         const authParam = url.searchParams.get('auth');
 
         if (!authParam) {
@@ -131,7 +124,7 @@ const server = https.createServer(sslOptions, async (req: IncomingMessage, res: 
     }
 
     // Handle /delete-acc
-    if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/delete-acc`) {
+    if (pathname === `${CONFIG.WSIO_API_PATH}/delete-acc`) {
         const authParam = url.searchParams.get('auth');
 
         if (!authParam) {
@@ -157,7 +150,7 @@ const server = https.createServer(sslOptions, async (req: IncomingMessage, res: 
     }
 
     // Handle /dummy
-    if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/dummy`) {
+    if (pathname === `${CONFIG.WSIO_API_PATH}/dummy`) {
         const numBytes = 10 + Math.floor(Math.random() * 991); // 10 to 1000
         const randomBytes = Buffer.alloc(numBytes);
 
@@ -172,7 +165,7 @@ const server = https.createServer(sslOptions, async (req: IncomingMessage, res: 
     }
 
     // Handle /whos-calling
-    if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/whos-calling`) {
+    if (pathname === `${CONFIG.WSIO_API_PATH}/whos-calling`) {
         const authParam = url.searchParams.get('auth');
 
         if (!authParam) {
@@ -215,45 +208,77 @@ const server = https.createServer(sslOptions, async (req: IncomingMessage, res: 
     // Default: serve HTML page
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(defaultHtml);
-});
-
-// Create WebSocket server
-const wss = new WebSocket.Server({ server });
-
-wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
-    try {
-        ws.on('error', (error: Error) => {
-            console.error('WebSocket error:', error);
-            ws.terminate();
-        });
-
-        const url = new URL(req.url || '', `https://${req.headers.host}`);
-        const pathname = url.pathname;
-
-        // Handle WebSocket connections
-        if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/call`) {
-            await handleCallConnection(ws, req);
-        } else if (pathname === `${CONFIG.WSIO_PATH_IN_REQUEST}/pickup`) {
-            await handlePickupConnection(ws, req);
-        } else {
-            // Unknown WebSocket path
-            ws.close(1008, 'Unknown path');
-        }
-    } catch (e) {
-        console.error("Failed to handle WebSocket connection:", e)
-    }
-});
-
-// Start HTTP server solely for rejecting non-secure connections
-if (typeof CONFIG.HTTP_PORT === "number" && CONFIG.HTTP_PORT >= 0) {
-    httpServer.listen(CONFIG.HTTP_PORT, () => {
-        console.log(`HTTP server rejecting connections on port ${CONFIG.HTTP_PORT}`);
-    });
 }
 
-// Start HTTPS (+WSS) server
-server.listen(CONFIG.HTTPS_PORT, () => {
-    console.log(`HTTPS server running on port ${CONFIG.HTTPS_PORT}`);
-    console.log(`Users directory: ${path.resolve(CONFIG.USERS_DIR)}`);
-    console.log(`Serving HTML from: ${path.resolve(CONFIG.DEFAULT_HTML_PATH)}`);
+const activeServers = new Array<http.Server | https.Server>()
+
+// Run HTTP server if enabled
+if (CONFIG.HTTP_PORT != null && CONFIG.HTTP_REJECT) {
+    // Create HTTP server solely for rejecting non-secure connections
+    const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+        res.writeHead(403, {
+            'Content-Type': 'text/plain',
+            'Connection': 'close'
+        });
+        res.end('Please use https:// instead of http://.');
+        req.destroy();
+    });
+    server.listen(CONFIG.HTTP_PORT, () => {
+        console.log(`HTTP server rejecting connections on port ${CONFIG.HTTP_PORT}`);
+    });
+} else if (CONFIG.HTTP_PORT != null) {
+    // Create normally functioning HTTP server
+    const server = http.createServer(handleRequest);
+    server.listen(CONFIG.HTTP_PORT, () => {
+        console.log(`HTTP server running on port ${CONFIG.HTTP_PORT}`);
+    });
+    activeServers.push(server)
+} else {
+    console.log(`HTTP server is disabled`);
+}
+
+// Run HTTPS server if enabled
+if (CONFIG.HTTPS_PORT != null) {
+    if (sslOptions == null) {
+        throw Error(
+            "SSL certificate and key paths are required for the HTTPS server"
+        )
+    }
+
+    // Create HTTPS server
+    const server = https.createServer(sslOptions, handleRequest);
+    server.listen(CONFIG.HTTPS_PORT, () => {
+        console.log(`HTTPS server running on port ${CONFIG.HTTPS_PORT}`);
+    });
+    activeServers.push(server)
+} else {
+    console.log(`HTTPS server is disabled`);
+}
+
+// Create WebSocket server(s)
+activeServers.forEach(server => {
+    const ws_server = new WebSocket.Server({ server });
+    ws_server.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
+        try {
+            ws.on('error', (error: Error) => {
+                console.error('WebSocket error:', error);
+                ws.terminate();
+            });
+
+            const url = new URL(req.url || '', `https://${req.headers.host}`);
+            const pathname = url.pathname;
+
+            // Handle WebSocket connections
+            if (pathname === `${CONFIG.WSIO_API_PATH}/call`) {
+                await handleCallConnection(ws, req);
+            } else if (pathname === `${CONFIG.WSIO_API_PATH}/pickup`) {
+                await handlePickupConnection(ws, req);
+            } else {
+                // Unknown WebSocket path
+                ws.close(1008, 'Unknown path');
+            }
+        } catch (e) {
+            console.error("Failed to handle WebSocket connection:", e)
+        }
+    });
 });

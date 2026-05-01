@@ -200,8 +200,8 @@ def main():
         p.add_argument(
             "url",
             type=str,
-            help="WsIo server URL (HTTPS) ending with a slash. example: "
-            "\"https://example.com/wsio/\""
+            help="WsIo server URL (HTTPS or HTTP) ending with a slash. "
+            "example: \"https://example.com/wsio/\""
         )
         p.add_argument(
             "id",

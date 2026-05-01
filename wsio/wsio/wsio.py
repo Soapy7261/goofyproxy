@@ -147,7 +147,7 @@ class WsIo(GoofyIo):
     Args:
 
         url (str):
-            WsIo server URL (HTTPS) ending with a slash.
+            WsIo server URL (HTTPS or HTTP) ending with a slash.
             example: `https://example.com/wsio/`
 
         id (str):
@@ -235,7 +235,7 @@ class WsIo(GoofyIo):
         retry_interval: float = 2.,
         log_level: int | None = None
     ):
-        validate_server_url(url)
+        url = validate_server_url(url)
         validate_id(id)
         validate_password(password)
 
@@ -303,12 +303,18 @@ class WsIo(GoofyIo):
             f"outgoing data rate: ~{format_data_rate(out_data_rate)}"
         )
 
-        if not self.ssl_verify:
+        if self.url.startswith("https://") and not self.ssl_verify:
             # disable SSL warnings and log a single warning ourselves
             urllib3.disable_warnings()
             self._log.warning(
                 "WARNING: you have disabled SSL certificate verification. your "
                 "connection is vulnerable to man-in-the-middle attacks."
+            )
+        elif self.url.startswith("http://"):
+            self._log.warning(
+                "WARNING: you are using the non-secure HTTP protocol instead "
+                "of HTTPS to communicate with the WsIo server. your connection "
+                "is vulnerable to man-in-the-middle attacks."
             )
 
         self._out_buf = bytearray()
@@ -658,7 +664,7 @@ def delete_account(
     Args:
 
       url (str):
-          server URL (HTTPS) ending with a slash.
+          server URL (HTTPS or HTTP) ending with a slash.
           example: `https://example.com/wsio/`
 
       id (str):
@@ -700,11 +706,21 @@ ID_VALID_CHARS = \
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 
 
-def validate_server_url(url: str):
-    if not url.startswith("https://"):
-        raise ValueError("server URL must start with \"https://\"")
+def validate_server_url(url: str) -> str:
     if not url.endswith("/"):
         raise ValueError("server URL must end with \"/\"")
+
+    prefix = "https://"
+    if url.lower().startswith(prefix):
+        return prefix + url[len(prefix):]
+
+    prefix = "http://"
+    if url.lower().startswith(prefix):
+        return prefix + url[len(prefix):]
+
+    raise ValueError(
+        "server URL must start with \"https://\" or \"http://\""
+    )
 
 
 def validate_id(id: str):

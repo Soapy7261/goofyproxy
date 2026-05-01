@@ -49,7 +49,7 @@ export function validatePassword(password: string): boolean {
         }
     }
 
-    if (maxAdjacent > CONFIG.MAX_ADJACENT_IDENTICAL_CHARS) {
+    if (maxAdjacent > CONFIG.MAX_PASSWORD_ADJACENT_IDENTICAL_CHARS) {
         return false;
     }
 
