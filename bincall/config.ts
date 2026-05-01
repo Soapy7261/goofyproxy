@@ -9,8 +9,8 @@ export const CONFIG = {
     SSL_KEY_PATH: './.certs/server.key',
     SSL_CERT_PATH: './.certs/server.crt',
 
-    // WsIo API path
-    WSIO_API_PATH: '/wsio-carrot',
+    // bincall API path
+    BINCALL_API_PATH: '/bincall',
 
     // HTTPS server port. use null to disable the HTTPS server.
     HTTPS_PORT: 443,

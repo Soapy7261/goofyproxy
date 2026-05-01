@@ -8,6 +8,7 @@ import { URL } from 'url';
 import { Mutex, MutexInterface } from 'async-mutex';
 
 const userService = new UserService();
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 class Call {
     user0: string
@@ -115,10 +116,7 @@ async function startReceiveLoop(
         while (isActive && ws.readyState === WebSocket.OPEN) {
             let release: MutexInterface.Releaser | null = null
             try {
-                await new Promise(resolve => setTimeout(
-                    resolve,
-                    CONFIG.PACKET_POLL_INTERVAL_MS
-                ));
+                await sleep(CONFIG.PACKET_POLL_INTERVAL_MS)
 
                 release = await theirPakcetsMutex.acquire();
                 if (theirPackets.length < 1) {
@@ -266,9 +264,7 @@ export async function handleCallConnection(
             answered = true;
             break;
         }
-        await new Promise(
-            resolve => setTimeout(resolve, CONFIG.CALL_ANSWER_POLL_INTERVAL_MS)
-        );
+        await sleep(CONFIG.CALL_ANSWER_POLL_INTERVAL_MS)
     }
 
     // Remove the incoming call

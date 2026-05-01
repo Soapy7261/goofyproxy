@@ -27,10 +27,10 @@ Now let's see what this project provides.
 fundumental classes we can build upon: `GoofyIo`, `GoofyServer` and
 `GoofyClient`.
 
-# WsIo
+# bincall-io
 
-[WsIo](./wsio) uses a [WsIo Server](./wsio-server) to transfer bytes through
-"binary calls" and runs goofyproxy on top of that.
+[bincall-io](./bincall-io) uses a [bincall Server](./bincall) to transfer bytes
+through "binary calls" and runs goofyproxy on top of that.
 
 # VideoIo
 

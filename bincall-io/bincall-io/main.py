@@ -8,7 +8,7 @@ from goofyproxy import GoofyServer, GoofyClient, AddressFilterType, \
     ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN
 import goofyproxy.common as goofycommon
 
-from wsio import WsIo, CallerMode, CalleeMode, delete_account
+from bincallio import BincallIo, CallerMode, CalleeMode, delete_account
 
 
 def run(args: argparse.Namespace):
@@ -42,7 +42,7 @@ def run(args: argparse.Namespace):
             return
 
         while True:
-            gio = WsIo(
+            gio = BincallIo(
                 url=args.url,
                 id=args.id,
                 password=args.password,
@@ -79,7 +79,7 @@ def run(args: argparse.Namespace):
             time.sleep(args.endless_wait)
     elif args.command == "client":
         while True:
-            gio = WsIo(
+            gio = BincallIo(
                 url=args.url,
                 id=args.id,
                 password=args.password,
@@ -167,9 +167,8 @@ def main():
     # command line parser
 
     parser = argparse.ArgumentParser(
-        description="goofy proxy on WsIo: share your internet connection with "
-        "a friend through WsIo, a very basic WebSocket-based binary call  "
-        "service."
+        description="goofy proxy on bincall: share your internet connection "
+        "with a friend through bincall, a basic binary call service."
     )
     subparsers = parser.add_subparsers(
         dest="command",
@@ -179,17 +178,17 @@ def main():
 
     parser_server = subparsers.add_parser(
         "server",
-        help="wait for an incoming WsIo call, pick it up, and run GoofyServer "
+        help="wait for an incoming call, pick it up, and run GoofyServer "
         "on top of it."
     )
     parser_client = subparsers.add_parser(
         "client",
-        help="call a WsIo user and run GoofyClient on top of it. the peer must "
-        "be running GoofyServer on its side."
+        help="call a user and run GoofyClient on top of it. the peer must be "
+        "running GoofyServer on its side."
     )
     parser_delete_acc = subparsers.add_parser(
         "delete-acc",
-        help="delete WsIo user account."
+        help="delete user account."
     )
     parser_filter_help = subparsers.add_parser(
         "filter-help",
@@ -200,8 +199,8 @@ def main():
         p.add_argument(
             "url",
             type=str,
-            help="WsIo server URL (HTTPS or HTTP) ending with a slash. "
-            "example: \"https://example.com/wsio/\""
+            help="bincall server URL (HTTPS or HTTP) ending with a slash. "
+            "example: \"https://example.com/bincall/\""
         )
         p.add_argument(
             "id",
@@ -244,7 +243,7 @@ def main():
         "-e",
         "--endless",
         action="store_true",
-        help="wait for another WsIo call every time one ends"
+        help="wait for another call every time one ends"
     )
     default = 2.
     parser_server.add_argument(
@@ -324,7 +323,7 @@ def main():
             type=int,
             default=default,
             help=f"[{default=}] how many times to retry when a request to the "
-            "WsIo server fails."
+            "bincall server fails."
         )
         default = 2.
         p.add_argument(
@@ -333,7 +332,7 @@ def main():
             type=int,
             default=default,
             help=f"[{default=}] how long to wait in seconds before retrying a "
-            "request to the WsIo server."
+            "request to the bincall server."
         )
 
     parser_client.add_argument(

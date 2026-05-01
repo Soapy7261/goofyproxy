@@ -1,7 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as fs from 'fs';
-import * as path from 'path';
 import * as WebSocket from 'ws';
 import { IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
@@ -28,7 +27,9 @@ if (CONFIG.HTTPS_PORT != null
 }
 
 // Returns authResult ("ok" if successful) and userId.
-async function authenticate(authCodeBase64: string): Promise<{ authResult: string, userId: string }> {
+async function authenticate(
+    authCodeBase64: string
+): Promise<{ authResult: string, userId: string }> {
     // Decode auth
     const authData = decodeAuth(authCodeBase64);
     if (!authData) {
@@ -58,8 +59,8 @@ async function handleRequest(
     const url = new URL(req.url || '', `https://${req.headers.host}`);
     const pathname = url.pathname;
 
-    // Handle /prepare
-    if (pathname === `${CONFIG.WSIO_API_PATH}/prepare`) {
+    // Handle /authenticate
+    if (pathname === `${CONFIG.BINCALL_API_PATH}/authenticate`) {
         const authParam = url.searchParams.get('auth');
 
         if (!authParam) {
@@ -106,7 +107,7 @@ async function handleRequest(
             if (!validatePassword(password)) {
                 // Password validation failed
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ authResult: 'failed to create new user because of invalid password' }));
+                res.end(JSON.stringify({ authResult: 'failed to create new user: bad password' }));
                 return;
             }
 
@@ -126,7 +127,7 @@ async function handleRequest(
     }
 
     // Handle /delete-acc
-    if (pathname === `${CONFIG.WSIO_API_PATH}/delete-acc`) {
+    if (pathname === `${CONFIG.BINCALL_API_PATH}/delete-acc`) {
         const authParam = url.searchParams.get('auth');
 
         if (!authParam) {
@@ -152,7 +153,7 @@ async function handleRequest(
     }
 
     // Handle /dummy
-    if (pathname === `${CONFIG.WSIO_API_PATH}/dummy`) {
+    if (pathname === `${CONFIG.BINCALL_API_PATH}/dummy`) {
         const numBytes = 10 + Math.floor(Math.random() * 991); // 10 to 1000
         const randomBytes = Buffer.alloc(numBytes);
 
@@ -167,7 +168,7 @@ async function handleRequest(
     }
 
     // Handle /whos-calling
-    if (pathname === `${CONFIG.WSIO_API_PATH}/whos-calling`) {
+    if (pathname === `${CONFIG.BINCALL_API_PATH}/whos-calling`) {
         const authParam = url.searchParams.get('auth');
 
         if (!authParam) {
@@ -271,9 +272,9 @@ activeServers.forEach(server => {
             const pathname = url.pathname;
 
             // Handle WebSocket connections
-            if (pathname === `${CONFIG.WSIO_API_PATH}/call`) {
+            if (pathname === `${CONFIG.BINCALL_API_PATH}/call`) {
                 await handleCallConnection(ws, req);
-            } else if (pathname === `${CONFIG.WSIO_API_PATH}/pickup`) {
+            } else if (pathname === `${CONFIG.BINCALL_API_PATH}/pickup`) {
                 await handlePickupConnection(ws, req);
             } else {
                 // Unknown WebSocket path

@@ -1,7 +1,7 @@
 {
-    "name": "wsio-server",
+    "name": "bincall-server",
     "version": "1.0.0",
-    "description": "WebSocket-based binary call system",
+    "description": "bincall server implementation (binary call service)",
     "main": "server.ts",
     "scripts": {
         "build": "tsc",

@@ -1,6 +1,6 @@
 """
-provides `WsIo`, a `GoofyIo` child class for data transfer through WebSocket
-connections.
+provides `BincallIo`, a `GoofyIo` child class for data transfer through bincall
+binary calls.
 """
 
 import time
@@ -22,7 +22,7 @@ from goofyproxy import GoofyIo
 from goofyproxy.common import *
 
 
-class WsIoError(IOError):
+class BincallIoError(IOError):
     pass
 
 
@@ -138,17 +138,16 @@ class CalleeMode(NamedTuple):
     """
 
 
-class WsIo(GoofyIo):
+class BincallIo(GoofyIo):
     """
-    a `GoofyIo` that transfers data through WsIo, a very basic WebSocket-based
-    binary call service. note that this only works with Node.js servers running
-    the WsIo server.
+    a `GoofyIo` that transfers data through bincall, a basic binary call
+    service.
 
     Args:
 
         url (str):
-            WsIo server URL (HTTPS or HTTP) ending with a slash.
-            example: `https://example.com/wsio/`
+            bincall server URL (HTTPS or HTTP) ending with a slash.
+            example: `https://example.com/bincall/`
 
         id (str):
             user ID to send packets as. a new user will be created if the ID
@@ -181,10 +180,10 @@ class WsIo(GoofyIo):
             enable SSL certificate verification (recommended).
 
         n_retries (int):
-            how many times to retry when a request to the WsIo server fails.
+            how many times to retry when a request to the bincall server fails.
 
         retry_interval (float):
-            how long to wait in seconds before retrying a request to the WsIo
+            how long to wait in seconds before retrying a request to the bincall
             server.
 
         log_level (int | None):
@@ -272,7 +271,7 @@ class WsIo(GoofyIo):
                 f"{type(call_mode)}."
             )
 
-        self._log = make_logger(f"WsIo", log_level)
+        self._log = make_logger(f"BincallIo", log_level)
 
         self.url = url
         self.id = id
@@ -313,8 +312,8 @@ class WsIo(GoofyIo):
         elif self.url.startswith("http://"):
             self._log.warning(
                 "WARNING: you are using the non-secure HTTP protocol instead "
-                "of HTTPS to communicate with the WsIo server. your connection "
-                "is vulnerable to man-in-the-middle attacks."
+                "of HTTPS to communicate with the bincall server. your "
+                "connection is vulnerable to man-in-the-middle attacks."
             )
 
         self._out_buf = bytearray()
@@ -326,7 +325,7 @@ class WsIo(GoofyIo):
 
         self._auth_code = generate_auth_code(self.id, self.password)
         res = self._request_json(
-            "prepare",
+            "authenticate",
             {"auth": self._auth_code}
         )
 
@@ -336,11 +335,11 @@ class WsIo(GoofyIo):
         elif auth_result == "ok-created":
             self._log.info("authentication was successful (created new user)")
         else:
-            raise WsIoError(f"authentication failed: {auth_result}")
+            raise BincallIoError(f"authentication failed: {auth_result}")
 
         # continue in a separate thread
         self._thread = threading.Thread(
-            name="WsIo thread",
+            name="BincallIo thread",
             target=self._thread_run,
             daemon=True
         )
@@ -369,7 +368,7 @@ class WsIo(GoofyIo):
     def _receive(self, size: int) -> bytes:
         while True:
             if not self.running():
-                raise ConnectionError("WsIo has stopped")
+                raise ConnectionError("BincallIo has stopped")
 
             poll_interval = min(.05, self.interval_min)
 
@@ -390,7 +389,7 @@ class WsIo(GoofyIo):
 
     def _send(self, data: bytes):
         if not self.running():
-            raise ConnectionError("WsIo has stopped")
+            raise ConnectionError("BincallIo has stopped")
 
         force_acquire(self._out_buf_lock)
         self._out_buf += data
@@ -467,7 +466,7 @@ class WsIo(GoofyIo):
                     )
                     auth_result = res["authResult"]
                     if auth_result != "ok":
-                        raise WsIoError(
+                        raise BincallIoError(
                             f"authentication failed: {auth_result}"
                         )
                     calls = res["calls"]
@@ -661,13 +660,13 @@ def delete_account(
     ssl_verify: bool = True
 ):
     """
-    delete WsIo user account with given ID and password.
+    delete user account with given ID and password.
 
     Args:
 
       url (str):
-          server URL (HTTPS or HTTP) ending with a slash.
-          example: `https://example.com/wsio/`
+          bincall server URL (HTTPS or HTTP) ending with a slash.
+          example: `https://example.com/bincall/`
 
       id (str):
           ID of the user account to delete.
@@ -695,11 +694,11 @@ def delete_account(
 
     auth_result = res["authResult"]
     if auth_result != "ok":
-        raise WsIoError(f"authentication failed: {auth_result}")
+        raise BincallIoError(f"authentication failed: {auth_result}")
 
     delete_result = res["deleteResult"]
     if delete_result != "ok":
-        raise WsIoError(
+        raise BincallIoError(
             f"account deletion failed: {delete_result}"
         )
 

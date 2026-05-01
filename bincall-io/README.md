@@ -1,7 +1,7 @@
-# WsIo Client
+# bincall-io
 
-`WsIo` is a child class of `GoofyIo` that uses a [WsIo Server](../wsio-server)
-to transfer bytes through "binary calls".
+`BincallIo` is a child class of `GoofyIo` that uses a
+[bincall Server](../bincall) to transfer bytes through "binary calls".
 
 Run `python ./main.py -h` to see a detailed and human-readable help message.
 
