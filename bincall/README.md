@@ -145,8 +145,8 @@ key, send text frame "call-start-" followed by the key (e.g.
 using ARC4 encryption which is insecure and only used for obfuscating the data.
 For relaying data, the server will keep receiving binary frames from the
 WebSocket client, decrypt them with ARC4 using the call key, and forward them to
-the peer using any method applicable (global variables, sockets, files,
-distributed networks, etc.). At the same time, the server will also keep
+the peer using any method applicable (global variables, sockets, databases,
+files, distributed networks, etc.). At the same time, the server will also keep
 receiving binary packets from the peer, encrypt them with ARC4 using the call
 key, and send them to the WebSocket client. The process will continue until
 either side (the WebSocket client or the peer) closes the connection. If the
@@ -192,8 +192,8 @@ and start relaying data between the two users
 using ARC4 encryption which is insecure and only used for obfuscating the data.
 For relaying data, the server will keep receiving binary frames from the
 WebSocket client, decrypt them with ARC4 using the call key, and forward them to
-the peer using any method applicable (global variables, sockets, files,
-distributed networks, etc.). At the same time, the server will also keep
+the peer using any method applicable (global variables, sockets, databases,
+files, distributed networks, etc.). At the same time, the server will also keep
 receiving binary packets from the peer, encrypt them with ARC4 using the call
 key, and send them to the WebSocket client. The process will continue until
 either side (the WebSocket client or the peer) closes the connection. If the
