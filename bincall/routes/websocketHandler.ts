@@ -2,6 +2,7 @@ import * as WebSocket from 'ws';
 import { CONFIG } from '../config';
 import { decodeAuth } from '../utils/auth';
 import { validateUserId } from '../utils/validation';
+import { insecureEncrypt, insecureDecrypt } from '../utils/crypto';
 import { UserService } from '../services/userService';
 import { IncomingMessage } from 'http';
 import { URL } from 'url';
@@ -106,10 +107,11 @@ async function removeCall(user0_unsorted: string, user1_unsorted: string) {
 
 async function startReceiveLoop(
     ws: WebSocket,
+    key: string,
     myId: string,
     theirId: string,
     theirPackets: Array<Buffer>,
-    theirPakcetsMutex: Mutex
+    theirPakcetsMutex: Mutex,
 ): Promise<void> {
     let isActive = true;
     const poll = async () => {
@@ -139,7 +141,7 @@ async function startReceiveLoop(
                     }
 
                     // Send binary frame
-                    ws.send(packet);
+                    ws.send(insecureEncrypt(packet, key));
                 }
                 theirPackets.length = 0
                 release()
@@ -408,12 +410,21 @@ async function startCall(ws: WebSocket, call: Call, myId: string) {
         theirId = call.user0
     }
 
+    const keyParts0: string[] = ['pretty', 'beautiful', 'cute', 'angry', 'aggressive', 'wild', 'sad', 'happy', 'weird', 'surprised', 'excited', 'baby', 'old', 'grateful'];
+    const keyParts1: string[] = ['panda', 'flamingo', 'duck', 'chicken', 'penguin', 'ostrich', 'bird', 'parrot', 'sheep', 'cow', 'goat', 'camel', 'fish', 'shark', 'whale', 'turtle', 'cat', 'dog'];
+
+    const keyPart0 = getRandomElement(keyParts0);
+    const keyPart1 = getRandomElement(keyParts1);
+    const keyPart2 = 100 + Math.floor(Math.random() * 900);
+    const callKey = `${keyPart0}-${keyPart1}-${keyPart2}`;
+
     // Send call-start
-    ws.send('call-start');
+    ws.send(`call-start-${callKey}`);
 
     // Start receive loop
     startReceiveLoop(
         ws,
+        callKey,
         myId,
         theirId,
         theirPackets,
@@ -426,7 +437,7 @@ async function startCall(ws: WebSocket, call: Call, myId: string) {
         if (data instanceof Buffer && data.byteLength > 0) {
             try {
                 const release = await myPakcetsMutex.acquire();
-                myPackets.push(data)
+                myPackets.push(insecureDecrypt(data, callKey))
                 release()
             } catch (error) {
                 console.error('Failed to write packet:', error);
@@ -448,4 +459,8 @@ async function startCall(ws: WebSocket, call: Call, myId: string) {
             console.error('Failed to end the call:', error);
         }
     });
+}
+
+function getRandomElement<T>(arr: T[]): T {
+    return arr[Math.floor(Math.random() * arr.length)];
 }

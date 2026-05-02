@@ -218,6 +218,7 @@ class BincallIo(GoofyIo):
     _peer_id: str | None = None
     _call_timestamp: int = 0
     _ws: WsClient | None = None
+    _call_key: str | None = None
 
     def __init__(
         self,
@@ -418,8 +419,11 @@ class BincallIo(GoofyIo):
                     },
                     ssl_verify=self.ssl_verify
                 )
+
                 msg = self._ws.read()
-                if msg == "call-start":
+                prefix = "call-start-"
+                if msg.startswith(prefix):
+                    self._call_key = msg[len(prefix):]
                     self._log.info("call started")
                 else:
                     raise ConnectionAbortedError(
@@ -504,8 +508,11 @@ class BincallIo(GoofyIo):
                     },
                     ssl_verify=self.ssl_verify
                 )
+
                 msg = self._ws.read()
-                if msg == "call-start":
+                prefix = "call-start-"
+                if msg.startswith(prefix):
+                    self._call_key = msg[len(prefix):]
                     self._log.info("call started")
                 else:
                     raise ConnectionAbortedError(
@@ -575,6 +582,9 @@ class BincallIo(GoofyIo):
         else:
             data = b"c" + data
 
+        # obfuscate
+        data = insecure_encrypt(data, self._call_key)
+
         if self._stopping:
             return
         self._ws.send(data)
@@ -592,6 +602,9 @@ class BincallIo(GoofyIo):
 
         if not data:
             return
+
+        # de-obfuscate
+        data = insecure_decrypt(data, self._call_key)
 
         # decompress if needed
         if data[0] == b"C":
@@ -764,3 +777,44 @@ def generate_auth_code(id: str, password: str) -> str:
 
     raw = len(id).to_bytes(1) + id + len(password).to_bytes(1) + password
     return base64.b64encode(raw)
+
+
+def _rc4_crypt(data: bytes, key: bytes) -> bytes:
+    # Key-scheduling algorithm (KSA)
+    S = list(range(256))
+    j = 0
+    key_len = len(key)
+    for i in range(256):
+        j = (j + S[i] + key[i % key_len]) & 0xFF
+        S[i], S[j] = S[j], S[i]
+
+    # Pseudo-random generation algorithm (PRGA)
+    i = j = 0
+    out = bytearray(len(data))
+    for idx, byte in enumerate(data):
+        i = (i + 1) & 0xFF
+        j = (j + S[i]) & 0xFF
+        S[i], S[j] = S[j], S[i]
+        k = S[(S[i] + S[j]) & 0xFF]
+        out[idx] = byte ^ k
+    return bytes(out)
+
+
+def insecure_encrypt(data: bytes, key: str) -> bytes:
+    """
+    encrypt (obfuscate) binary data with the given key.
+
+    NOTE: this is not a secure algorithm and is only used to prevent plain text
+    triggers, especially when using non-secure HTTP connections.
+    """
+    return _rc4_crypt(data, key.encode('utf-8'))
+
+
+def insecure_decrypt(data: bytes, key: str) -> bytes:
+    """
+    decrypt (identical operation for a stream cipher)
+
+    NOTE: this is not a secure algorithm and is only used to prevent plain text
+    triggers, especially when using non-secure HTTP connections.
+    """
+    return _rc4_crypt(data, key.encode('utf-8'))
