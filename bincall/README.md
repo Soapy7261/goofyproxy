@@ -30,7 +30,8 @@ complete.
 6. The server must relay raw byte data between parties in a call accurately and
 without corruption. Byte order and values must never be altered, intentionally
 or otherwise. If a party experiences irreversible data loss or corruption at any
-point (whether incoming or outgoing), the server must end the call immediately.
+point (whether incoming or outgoing), both the server and the client must
+terminate the connection immediately.
 
 # API
 
