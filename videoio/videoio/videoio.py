@@ -23,7 +23,6 @@ from PySide6.QtCore import Qt, QTimer, QPoint, QSize
 from PySide6.QtGui import QImage, QPixmap, QMouseEvent
 
 import mss
-from mss.base import MSSBase
 from mss.models import Monitor
 
 from PIL import Image
@@ -508,7 +507,7 @@ class VideoIo(GoofyIo):
     _timer: QTimer
     _window_position: tuple[int, int] | None = None
 
-    _sct: MSSBase | None = None
+    _sct: mss.MSS | None = None
     _monitor: Monitor | None = None
 
     _sender_id: str = ""
@@ -620,7 +619,7 @@ class VideoIo(GoofyIo):
         self._stopping = True
 
     def get_monitors() -> list[Monitor]:
-        sct = mss.mss()
+        sct = mss.MSS()
         mons = sct.monitors[1:]
         sct.close()
         return mons
