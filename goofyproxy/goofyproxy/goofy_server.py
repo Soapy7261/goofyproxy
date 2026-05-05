@@ -3,6 +3,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 import logging
+from pympler.asizeof import asizeof
 
 from .address_filter import *
 from .goofyio import *
@@ -65,6 +66,11 @@ class GoofyServer:
         enable_udp_relay (bool):
             enable support for the UDP relay command.
 
+        memory_limit_mib (float):
+            maximum memory usage of sockets and UDP relays in Mebibytes (1 MiB =
+            1048576 bytes) before we start deleting the ones with the highest
+            memory usage.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -88,6 +94,7 @@ class GoofyServer:
     fake_bind_address: bool
     enable_bind: bool
     enable_udp_relay: bool
+    memory_limit_mib: float
 
     _running: bool = False
 
@@ -131,6 +138,8 @@ class GoofyServer:
     _outgoing_packet_queue: list[GoofyPacket]
     _outgoing_packet_queue_lock: threading.Lock
 
+    _last_memory_cleanup_time: float = 0.
+
     def __init__(
         self,
         io: GoofyIo,
@@ -140,6 +149,7 @@ class GoofyServer:
         fake_bind_address: bool = True,
         enable_bind: bool = False,
         enable_udp_relay: bool = True,
+        memory_limit_mib: float = 2048.,
         log_level: int | None = None
     ) -> None:
         global keyboard_interrupt
@@ -154,6 +164,7 @@ class GoofyServer:
         self.fake_bind_address = fake_bind_address
         self.enable_bind = enable_bind
         self.enable_udp_relay = enable_udp_relay
+        self.memory_limit_mib = float(memory_limit_mib)
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()
@@ -352,6 +363,9 @@ class GoofyServer:
 
                 self._sockets_lock.release()
                 sockets_locked = False
+
+                # clean up memory if needed
+                self._cleanup_memory()
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
@@ -701,3 +715,71 @@ class GoofyServer:
         force_acquire(self._outgoing_packet_queue_lock)
         self._outgoing_packet_queue.extend(packets)
         self._outgoing_packet_queue_lock.release()
+
+    def _cleanup_memory(self):
+        if time.time() - self._last_memory_cleanup_time \
+                < GOOFY_MEMORY_CLEANUP_INTERVAL:
+            return
+        self._last_memory_cleanup_time = time.time()
+
+        force_acquire(self._sockets_lock)
+        force_acquire(self._udp_relays_lock)
+
+        extra_bytes = int(
+            asizeof(self._sockets, self._udp_relays)
+            - (self.memory_limit_mib * 1024. * 1024.)
+        )
+        initial_extra_bytes = extra_bytes
+        if extra_bytes < 1:
+            self._udp_relays_lock.release()
+            self._sockets_lock.release()
+            return
+
+        # sort sockets and UDP relays by decreasing size
+        flat: list[tuple[int, GoofyServerSocket | GoofyServerUdpRelay]] = \
+            list(self._sockets.items()) + list(self._udp_relays.items())
+        flat.sort(key=lambda s: asizeof(s[1]), reverse=True)
+
+        # keep deleting until we go below the memory limit
+        n_sockets_deleted: int = 0
+        n_udp_relays_deleted: int = 0
+        while extra_bytes > 0 and flat:
+            item = flat[0]
+            flat = flat[1:]
+            if isinstance(item[1], GoofyServerSocket):
+                socket_id, sock = item
+
+                force_acquire(sock.lock)
+                extra_bytes -= asizeof(sock)
+
+                sock.relaying = False
+                sock.in_buf.clear()
+                close_socket(sock.remote)
+
+                self._sockets.pop(socket_id, None)
+                sock.lock.release()
+
+                n_sockets_deleted += 1
+            elif isinstance(item[1], GoofyServerUdpRelay):
+                relay_id, relay = item
+
+                force_acquire(relay.lock)
+                extra_bytes -= asizeof(relay)
+                close_socket(relay.sock)
+                self._udp_relays.pop(relay_id, None)
+                relay.lock.release()
+
+                n_udp_relays_deleted += 1
+            else:
+                raise TypeError(
+                    f"unsupported type for memory cleanup: {type(item[1])}"
+                )
+
+        self._udp_relays_lock.release()
+        self._sockets_lock.release()
+
+        self._log.warning(
+            f"cleaned up {format_data_size(initial_extra_bytes - extra_bytes)} "
+            f"of memory by deleting {n_sockets_deleted} sockets and "
+            f"{n_udp_relays_deleted} UDP relays."
+        )

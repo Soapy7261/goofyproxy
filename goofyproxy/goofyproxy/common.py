@@ -1,9 +1,9 @@
 import sys
-import logging
 import time
 import socket
 import select
 import threading
+import logging
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TextIO
@@ -13,14 +13,21 @@ import netifaces
 
 from .goofyio import *
 
-GOOFY_VERSION = 1
+
+GOOFY_VERSION: int = 1
 """goofy proxy version as an integer"""
 
-GOOFY_MIN_SERVER_VERSION = 1
+GOOFY_MIN_SERVER_VERSION: int = 1
 """the goofy client can only work with servers of this version or higher."""
 
-GOOFY_MIN_CLIENT_VERSION = 1
+GOOFY_MIN_CLIENT_VERSION: int = 1
 """the goofy server can only work with clients of this version or higher."""
+
+GOOFY_MEMORY_CLEANUP_INTERVAL: float = 5.
+"""
+memory cleanup interval in seconds (in case the memory limit of GoofyClient or
+GoofyServer is exceeded).
+"""
 
 log_level: int = logging.INFO
 """logging level"""
@@ -172,31 +179,6 @@ def make_logger(name: str, level: int | None = None) -> logging.Logger:
 root_log = make_logger("root")
 
 
-def encode_str_len(s: str) -> bytes:
-    """
-    returns a bytes object with two bytes for the length of the string followed
-    by the actual string with UTF-8 encoding.
-    """
-    b = s.encode()
-    if len(b) >= 2**16:
-        raise ValueError(
-            f"tried to encode a ginormous string ({len(b)} bytes in UTF-8)"
-        )
-    return len(b).to_bytes(2) + b
-
-
-def encode_float32(v: float) -> bytes:
-    return struct.pack('>f', v)
-
-
-def decode_float32(b: bytes) -> float:
-    if len(b) != 4:
-        raise BufferError(
-            f"need exactly 4 bytes to decode a float32 (got {len(b)} bytes)"
-        )
-    return float(struct.unpack('>f', b)[0])
-
-
 def get_machine_ips():
     ips: list[str] = []
     for iface in netifaces.interfaces():
@@ -247,6 +229,31 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
             )
         buf += chunk
     return buf
+
+
+def encode_str_len(s: str) -> bytes:
+    """
+    returns a bytes object with two bytes for the length of the string followed
+    by the actual string with UTF-8 encoding.
+    """
+    b = s.encode()
+    if len(b) >= 2**16:
+        raise ValueError(
+            f"tried to encode a ginormous string ({len(b)} bytes in UTF-8)"
+        )
+    return len(b).to_bytes(2) + b
+
+
+def encode_float32(v: float) -> bytes:
+    return struct.pack('>f', v)
+
+
+def decode_float32(b: bytes) -> float:
+    if len(b) != 4:
+        raise BufferError(
+            f"need exactly 4 bytes to decode a float32 (got {len(b)} bytes)"
+        )
+    return float(struct.unpack('>f', b)[0])
 
 
 def format_exception(e: Exception) -> str:

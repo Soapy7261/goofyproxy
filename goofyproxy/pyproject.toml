@@ -2,7 +2,7 @@
 name = "goofyproxy"
 version = "0.1.0"
 requires-python = ">=3.8"
-dependencies = ["netifaces2>=0.0.22"]
+dependencies = ["netifaces2>=0.0.22", "pympler>=1.1"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
