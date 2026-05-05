@@ -55,7 +55,7 @@ def run(args: argparse.Namespace):
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
                 n_retries=args.retries,
-                retry_interval=args.retry_interval,
+                retry_interval=args.retry_interval
             )
 
             GoofyServer(
@@ -65,6 +65,10 @@ def run(args: argparse.Namespace):
 
                 address_filter_type=AddressFilterType.Allow
                 if args.address_filter_allow else AddressFilterType.Block,
+
+                fake_bind_address=not args.send_bind_address,
+                enable_bind=args.enable_bind,
+                enable_udp_relay=not args.no_udp_relay
             )
 
             gio.stop()
@@ -92,7 +96,7 @@ def run(args: argparse.Namespace):
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
                 n_retries=args.retries,
-                retry_interval=args.retry_interval,
+                retry_interval=args.retry_interval
             )
 
             GoofyClient(
@@ -407,6 +411,31 @@ def main():
         "use direct connections and other addresses will be proxied. if "
         "enabled, only addresses matching --bypass-filter will be proxied and "
         "the rest will use direct connections."
+    )
+
+    parser_server.add_argument(
+        "-b",
+        "--send-bind-address",
+        action="store_true",
+        help="send the real local bind address (host and port) instead of "
+        "0.0.0.0:0 in the open (SOCKS5 CONNECT) command which could expose the "
+        "server's local network topology. most clients ignore this anyway."
+    )
+    parser_server.add_argument(
+        "-B",
+        "--enable-bind",
+        action="store_true",
+        help="enable support for the bind command which listens on a random "
+        "port on the server and sends the bind address to the client which "
+        "then tells a peer to connect to it. this is unnecessary for everyday "
+        "use and could expose the server's local network topology, so it's "
+        "disabled by default."
+    )
+    parser_server.add_argument(
+        "-u",
+        "--no-udp-relay",
+        action="store_true",
+        help="disable support for the UDP relay command."
     )
 
     parser_client.add_argument(

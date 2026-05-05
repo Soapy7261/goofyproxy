@@ -50,6 +50,21 @@ class GoofyServer:
             `AddressFilterType.Block`, will block remote connections to addresses
             matching `address_filter`.
 
+        fake_bind_address (bool):
+            send a fake bind address (0.0.0.0:0) in the open (SOCKS5 CONNECT)
+            command to avoid exposing the server's local network topology. most
+            clients ignore this anyway.
+
+        enable_bind (bool):
+            enable support for the bind command which listens on a random port
+            on the server and sends the bind address to the client which then
+            tells a peer to connect to it. this is unnecessary for everyday use
+            and could expose the server's local network topology, so it's
+            disabled by default.
+
+        enable_udp_relay (bool):
+            enable support for the UDP relay command.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -69,6 +84,10 @@ class GoofyServer:
     send_interval: float
     address_filter: str
     address_filter_type: AddressFilterType
+
+    fake_bind_address: bool
+    enable_bind: bool
+    enable_udp_relay: bool
 
     _running: bool = False
 
@@ -118,6 +137,9 @@ class GoofyServer:
         send_interval: float = .005,
         address_filter: str = ADDRESS_FILTER_LAN,
         address_filter_type: AddressFilterType = AddressFilterType.Block,
+        fake_bind_address: bool = True,
+        enable_bind: bool = False,
+        enable_udp_relay: bool = True,
         log_level: int | None = None
     ) -> None:
         global keyboard_interrupt
@@ -128,6 +150,10 @@ class GoofyServer:
         self.send_interval = float(send_interval)
         self.address_filter = address_filter
         self.address_filter_type = address_filter_type
+
+        self.fake_bind_address = fake_bind_address
+        self.enable_bind = enable_bind
+        self.enable_udp_relay = enable_udp_relay
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()
@@ -235,13 +261,19 @@ class GoofyServer:
                             GoofySocketStatus.FailedToOpenConnRefused
                         ))
                 elif isinstance(packet, GoofyCommandBind):
-                    t = threading.Thread(
-                        target=self._cmd_bind,
-                        name=f"[bind] {packet.socket_id_u32}",
-                        args=(packet,),
-                        daemon=True,
-                    )
-                    t.start()
+                    if enable_bind:
+                        t = threading.Thread(
+                            target=self._cmd_bind,
+                            name=f"[bind] {packet.socket_id_u32}",
+                            args=(packet,),
+                            daemon=True,
+                        )
+                        t.start()
+                    else:
+                        self._enqueue_outgoing_packet(GoofyEventSocketStatus(
+                            packet.socket_id_u32,
+                            GoofySocketStatus.FailedToOpenGeneral
+                        ))
                 elif isinstance(packet, GoofyCommandCloseSocket):
                     if packet.socket_id_u32 not in self._sockets.keys():
                         continue
@@ -252,13 +284,18 @@ class GoofyServer:
                     self._sockets.pop(packet.socket_id_u32, None)
                     sock.lock.release()
                 elif isinstance(packet, GoofyCommandOpenUdpRelay):
-                    t = threading.Thread(
-                        target=self._cmd_udp_relay,
-                        name=f"[udp relay] {packet.udp_relay_id_u16}",
-                        args=(packet,),
-                        daemon=True,
-                    )
-                    t.start()
+                    if enable_udp_relay:
+                        t = threading.Thread(
+                            target=self._cmd_udp_relay,
+                            name=f"[udp relay] {packet.udp_relay_id_u16}",
+                            args=(packet,),
+                            daemon=True,
+                        )
+                        t.start()
+                    else:
+                        self._enqueue_outgoing_packet(
+                            GoofyEventUdpRelayClosed(packet.udp_relay_id_u16)
+                        )
                 elif isinstance(
                     packet,
                     (GoofySocketIoPacket, GoofySocketIoSmallPacket)
@@ -391,7 +428,10 @@ class GoofyServer:
             self._sockets_lock.release()
 
             # inform the client which local address we bound to
-            bind_host, bind_port = target.getsockname()[:2]
+            if self.fake_bind_address:
+                bind_host, bind_port = ("0.0.0.0", 0)
+            else:
+                bind_host, bind_port = target.getsockname()[:2]
             self._enqueue_outgoing_packet(GoofyEventSocketBindInfo(
                 packet.socket_id_u32,
                 GoofySocketStatus.Open,
