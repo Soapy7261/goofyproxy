@@ -229,7 +229,7 @@ def main():
         )
         default = 2.
         p.add_argument(
-            "-g",
+            "-t",
             "--screenshot-speed",
             type=float,
             default=default,
@@ -344,7 +344,7 @@ def main():
     )
 
     parser_server.add_argument(
-        "-b",
+        "-j",
         "--send-bind-address",
         action="store_true",
         help="send the real local bind address (host and port) instead of "
@@ -378,8 +378,8 @@ def main():
     )
 
     for p in (parser_server, parser_client):
-        parser_server.add_argument(
-            "-B",
+        p.add_argument(
+            "-g",
             "--enable-bind",
             action="store_true",
             help="enable support for the bind command which tells the server "
@@ -388,7 +388,7 @@ def main():
             "unnecessary for everyday use and could expose the server's local "
             "network topology, so it's disabled by default."
         )
-        parser_server.add_argument(
+        p.add_argument(
             "-u",
             "--no-udp-relay",
             action="store_true",
