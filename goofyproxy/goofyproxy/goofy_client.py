@@ -149,6 +149,16 @@ class GoofyClient:
             NOTE: this only applies to proxied connections, not direct
             (bypassed) ones.
 
+        enable_bind (bool):
+            enable support for the bind command which tells the server to listen
+            on a random port and send the bind address to the client which then
+            tells a peer to connect to it. this is unnecessary for everyday use
+            and could expose the server's local network topology, so it's
+            disabled by default.
+
+        enable_udp_relay (bool):
+            enable support for the UDP relay command.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -170,6 +180,8 @@ class GoofyClient:
     bypass_filter: str
     bypass_filter_type: AddressFilterType
     early_success: bool
+    enable_bind: bool
+    enable_udp_relay: bool
 
     _server_sock: socket.socket | None = None
     _running: bool = False
@@ -244,6 +256,8 @@ class GoofyClient:
         bypass_filter: str = ADDRESS_FILTER_LAN,
         bypass_filter_type: AddressFilterType = AddressFilterType.Allow,
         early_success: bool = False,
+        enable_bind: bool = False,
+        enable_udp_relay: bool = True,
         log_level: int | None = None
     ) -> None:
         global keyboard_interrupt
@@ -265,6 +279,8 @@ class GoofyClient:
         self.bypass_filter = bypass_filter
         self.bypass_filter_type = bypass_filter_type
         self.early_success = early_success
+        self.enable_bind = enable_bind
+        self.enable_udp_relay = enable_udp_relay
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()
@@ -417,16 +433,22 @@ class GoofyClient:
                         self._log.info(cmd_name)
                         self._cmd_connect(client, atyp, dst_host, dst_port)
                 else:
-                    self._send_error(client, REP_CONN_REFUSED)
+                    self._send_error_and_close(client, REP_CONN_REFUSED)
             elif cmd == CMD_BIND:
-                self._log.info(cmd_name)
-                self._cmd_bind(client, atyp, dst_host, dst_port)
+                if self.enable_bind:
+                    self._log.info(cmd_name)
+                    self._cmd_bind(client, atyp, dst_host, dst_port)
+                else:
+                    self._send_error_and_close(client, REP_GENERAL_FAILURE)
             elif cmd == CMD_UDP_ASSOCIATE:
-                self._log.info(cmd_name)
-                self._cmd_udp_associate(client, atyp, dst_host, dst_port)
+                if self.enable_udp_relay:
+                    self._log.info(cmd_name)
+                    self._cmd_udp_associate(client, atyp, dst_host, dst_port)
+                else:
+                    self._send_error_and_close(client, REP_GENERAL_FAILURE)
             else:
                 self._log.warning(cmd_name)
-                self._send_error(client, REP_CMD_NOT_SUPPORTED)
+                self._send_error_and_close(client, REP_CMD_NOT_SUPPORTED)
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
 
@@ -674,10 +696,10 @@ class GoofyClient:
         target.settimeout(self.timeout)
         try:
             target.connect(sockaddr)
-        except ConnectionRefusedError:
+        except ConnectionRefusedError as e:
             close_socket(target)
             self._send_error(client, REP_CONN_REFUSED)
-            return
+            raise e
         except OSError as e:
             close_socket(target)
             self._send_error(client, REP_HOST_UNREACHABLE)

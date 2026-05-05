@@ -56,8 +56,8 @@ class GoofyServer:
             clients ignore this anyway.
 
         enable_bind (bool):
-            enable support for the bind command which listens on a random port
-            on the server and sends the bind address to the client which then
+            enable support for the bind command which tells the server to listen
+            on a random port and send the bind address to the client which then
             tells a peer to connect to it. this is unnecessary for everyday use
             and could expose the server's local network topology, so it's
             disabled by default.

@@ -287,10 +287,10 @@ class Socks5Server:
         target.settimeout(self.timeout)
         try:
             target.connect(sockaddr)
-        except ConnectionRefusedError:
+        except ConnectionRefusedError as e:
             close_socket(target)
             self._send_error(client, REP_CONN_REFUSED)
-            return
+            raise e
         except OSError as e:
             close_socket(target)
             self._send_error(client, REP_HOST_UNREACHABLE)

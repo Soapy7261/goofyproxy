@@ -111,7 +111,9 @@ def run(args: argparse.Namespace):
             bypass_filter_type=AddressFilterType.Block
             if args.bypass_filter_reverse else AddressFilterType.Allow,
 
-            early_success=args.early_success
+            early_success=args.early_success,
+            enable_bind=args.enable_bind,
+            enable_udp_relay=not args.no_udp_relay
         )
         gio.stop()
     else:
@@ -332,7 +334,7 @@ def main():
         "LAN addresses. use command filter-help to learn about the format."
     )
     parser_client.add_argument(
-        "-B",
+        "-r",
         "--bypass-filter-reverse",
         action="store_true",
         help="if disabled (default), addresses matching --bypass-filter will "
@@ -349,23 +351,6 @@ def main():
         "0.0.0.0:0 in the open (SOCKS5 CONNECT) command which could expose the "
         "server's local network topology. most clients ignore this anyway."
     )
-    parser_server.add_argument(
-        "-B",
-        "--enable-bind",
-        action="store_true",
-        help="enable support for the bind command which listens on a random "
-        "port on the server and sends the bind address to the client which "
-        "then tells a peer to connect to it. this is unnecessary for everyday "
-        "use and could expose the server's local network topology, so it's "
-        "disabled by default."
-    )
-    parser_server.add_argument(
-        "-u",
-        "--no-udp-relay",
-        action="store_true",
-        help="disable support for the UDP relay command."
-    )
-
     parser_client.add_argument(
         "-E",
         "--early-success",
@@ -388,6 +373,24 @@ def main():
         "NOTE: this only applies to proxied connections, not direct (bypassed) "
         "ones."
     )
+
+    for p in (parser_server, parser_client):
+        parser_server.add_argument(
+            "-B",
+            "--enable-bind",
+            action="store_true",
+            help="enable support for the bind command which tells the server "
+            "to listen on a random port and send the bind address to the "
+            "client which then tells a peer to connect to it. this is "
+            "unnecessary for everyday use and could expose the server's local "
+            "network topology, so it's disabled by default."
+        )
+        parser_server.add_argument(
+            "-u",
+            "--no-udp-relay",
+            action="store_true",
+            help="disable support for the UDP relay command."
+        )
 
     for p in (
         parser_server,
