@@ -129,6 +129,26 @@ class GoofyClient:
             matching `bypass_filter`. if set to `AddressFilterType.Block`, will
             bypass every address except ones matching `bypass_filter`.
 
+        early_success (bool):
+            when a CONNECT command is received from a local SOCKS5 client,
+            immediately send a success reply, lying to it that we've connected
+            to the target so it can start its handshake or send its first
+            message as early as possible to be buffered. this can save us a full
+            round-trip to the goofy server, but
+            1. it is against the SOCKS5 specification.
+            2. we will send a fake bind address (host and port) to the client
+               because we haven't had time to receive it from the goofy server.
+               this is fine in 99.9% of cases because clients usually ignore the
+               bind address and the goofy server may send fake values for
+               security anyways.
+            3. if the goofy server informs us that the connection actually
+               failed, we have no way of sending a proper error to the local
+               client because we're already started relaying, so we'll just
+               close the connection.
+
+            NOTE: this only applies to proxied connections, not direct
+            (bypassed) ones.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -149,6 +169,7 @@ class GoofyClient:
     address_filter_type: AddressFilterType
     bypass_filter: str
     bypass_filter_type: AddressFilterType
+    early_success: bool
 
     _server_sock: socket.socket | None = None
     _running: bool = False
@@ -222,6 +243,7 @@ class GoofyClient:
         address_filter_type: AddressFilterType = AddressFilterType.Block,
         bypass_filter: str = ADDRESS_FILTER_LAN,
         bypass_filter_type: AddressFilterType = AddressFilterType.Allow,
+        early_success: bool = False,
         log_level: int | None = None
     ) -> None:
         global keyboard_interrupt
@@ -242,6 +264,7 @@ class GoofyClient:
         self.address_filter_type = address_filter_type
         self.bypass_filter = bypass_filter
         self.bypass_filter_type = bypass_filter_type
+        self.early_success = early_success
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()
@@ -513,6 +536,17 @@ class GoofyClient:
             dst_port
         ))
 
+        if self.early_success:
+            # lie to the client that we've already connected so it starts
+            # sending its handshake or first message to be buffered. can save us
+            # a whole round-trip to the goofy server.
+            self._send_reply(
+                client,
+                REP_SUCCESS,
+                "0.0.0.0",
+                0
+            )
+
         # wait for the receive thread to update the status
         time_start = time.time()
         while True:
@@ -522,7 +556,10 @@ class GoofyClient:
                 self._sockets_lock.release()
 
                 sock.status = GoofySocketStatus.Closed
-                self._send_error_and_close(client, REP_GENERAL_FAILURE)
+                if self.early_success:
+                    close_socket(client)
+                else:
+                    self._send_error_and_close(client, REP_GENERAL_FAILURE)
 
                 raise Exception("socket ID is no longer in the dictionary")
 
@@ -535,7 +572,13 @@ class GoofyClient:
                 # stop if we've been waiting for too long
                 if time.time() - time_start > self.timeout * 1.2:
                     sock.status = GoofySocketStatus.Closed
-                    self._send_error_and_close(client, REP_HOST_UNREACHABLE)
+                    if self.early_success:
+                        close_socket(client)
+                    else:
+                        self._send_error_and_close(
+                            client,
+                            REP_HOST_UNREACHABLE
+                        )
 
                     self._sockets.pop(socket_id, None)
                     sock.lock.release()
@@ -552,7 +595,10 @@ class GoofyClient:
                 # failed to open
 
                 sock.status = GoofySocketStatus.Closed
-                self._send_error_and_close(client, fail_reply)
+                if self.early_success:
+                    close_socket(client)
+                else:
+                    self._send_error_and_close(client, fail_reply)
 
                 self._sockets.pop(socket_id, None)
                 sock.lock.release()
@@ -568,7 +614,10 @@ class GoofyClient:
                 break
             else:
                 sock.status = GoofySocketStatus.Closed
-                self._send_error_and_close(client, REP_GENERAL_FAILURE)
+                if self.early_success:
+                    close_socket(client)
+                else:
+                    self._send_error_and_close(client, REP_GENERAL_FAILURE)
 
                 self._sockets.pop(socket_id, None)
                 sock.lock.release()
@@ -577,12 +626,13 @@ class GoofyClient:
                 raise ValueError("unsupported socket status")
 
         # inform the client which local address the goofy server bound to
-        self._send_reply(
-            client,
-            REP_SUCCESS,
-            sock.bind_host,
-            sock.bind_port
-        )
+        if not self.early_success:
+            self._send_reply(
+                client,
+                REP_SUCCESS,
+                sock.bind_host,
+                sock.bind_port
+            )
 
         # the control and receive threads will handle relaying and closing
         sock.relaying = True
@@ -1285,6 +1335,8 @@ class GoofyClient:
                     force_acquire(sock.lock)
                     sock.status = GoofySocketStatus.Closed
                     self._sockets.pop(packet.socket_id_u32, None)
+                    if sock.relaying:
+                        close_socket(sock.client)
                     sock.lock.release()
                 elif isinstance(
                     packet,

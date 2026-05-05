@@ -111,6 +111,8 @@ def run(args: argparse.Namespace):
 
                 bypass_filter_type=AddressFilterType.Block
                 if args.bypass_filter_reverse else AddressFilterType.Allow,
+
+                early_success=args.early_success
             )
 
             gio.stop()
@@ -405,6 +407,29 @@ def main():
         "use direct connections and other addresses will be proxied. if "
         "enabled, only addresses matching --bypass-filter will be proxied and "
         "the rest will use direct connections."
+    )
+
+    parser_client.add_argument(
+        "-E",
+        "--early-success",
+        action="store_true",
+        help="when a CONNECT command is received from a local SOCKS5 client, "
+        "immediately send a success reply, lying to it that we've connected to "
+        "the target so it can start its handshake or send its first message as "
+        "early as possible to be buffered. this can save us a full round-trip "
+        "to the goofy server, but:\n"
+        "1. it is against the SOCKS5 specification.\n"
+        "2. we will send a fake bind address (host and port) to the client "
+        "because we haven't had time to receive it from the goofy server. this "
+        "is fine in 99.9%% of cases because clients usually ignore the bind "
+        "address and the goofy server may send fake values for security "
+        "anyways.\n"
+        "3. if the goofy server informs us that the connection actually "
+        "failed, we have no way of sending a proper error to the local client "
+        "because we're already started relaying, so we'll just close the "
+        "connection.\n"
+        "NOTE: this only applies to proxied connections, not direct (bypassed) "
+        "ones."
     )
 
     for p in (

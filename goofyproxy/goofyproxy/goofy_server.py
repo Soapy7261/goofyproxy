@@ -214,6 +214,12 @@ class GoofyServer:
                         address_filter,
                         address_filter_type
                     ):
+                        # register the socket ID as early as possible so we can
+                        # buffer potential incoming data from the client.
+                        self._sockets[packet.socket_id_u32] = \
+                            GoofyServerSocket(None)
+
+                        # then start the actual thread
                         t = threading.Thread(
                             target=self._cmd_open_socket,
 
@@ -375,10 +381,13 @@ class GoofyServer:
 
                 raise e
 
-            # register the socket ID to keep track of it
-            sock = GoofyServerSocket(target.dup())
             force_acquire(self._sockets_lock)
-            self._sockets[packet.socket_id_u32] = sock
+            if packet.socket_id_u32 not in self._sockets.keys():
+                self._sockets_lock.release()
+                raise LookupError(
+                    f"socket ID {packet.socket_id_u32} missing"
+                )
+            sock = self._sockets[packet.socket_id_u32]
             self._sockets_lock.release()
 
             # inform the client which local address we bound to
@@ -392,12 +401,12 @@ class GoofyServer:
 
             # the send and main threads will handle relaying and closing
             force_acquire(sock.lock)
+            sock.remote = target.dup()
             sock.relaying = True
             sock.last_io_time = time.time()
             sock.lock.release()
             self._log.debug(
-                f"relay planned: {packet.dst_host}:{packet.dst_port} "
-                f"<-> goofy client"
+                f"relay planned: {packet.dst_host}:{packet.dst_port}"
             )
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
@@ -488,7 +497,7 @@ class GoofyServer:
             sock.last_io_time = time.time()
             sock.lock.release()
             self._log.debug(
-                f"relay planned: {remote_host}:{remote_port} <-> goofy client"
+                f"relay planned: {remote_host}:{remote_port}"
             )
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
