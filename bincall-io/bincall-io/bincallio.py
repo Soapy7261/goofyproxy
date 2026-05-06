@@ -43,6 +43,8 @@ class WsClient:
         url: str,
         params: dict | None = None,
         headers: list | dict | None = None,
+        http_proxy: tuple[str, int] | None = None,
+        http_proxy_auth: tuple[str, str] | None = None,
         ssl_verify: bool = True
     ):
         # configure SSL options
@@ -52,22 +54,31 @@ class WsClient:
 
         http_prefix = "http://"
         https_prefix = "https://"
-        if url.startswith(https_prefix):
-            url = "wss://" + url[len(https_prefix):]
-        elif url.startswith(http_prefix):
+        if url.startswith(http_prefix):
             url = "ws://" + url[len(http_prefix):]
+        elif url.startswith(https_prefix):
+            url = "wss://" + url[len(https_prefix):]
 
         if params is not None:
             url += "?" + urlencode(params)
 
+        http_proxy_host = None
+        http_proxy_port = None
+        if http_proxy:
+            http_proxy_host, http_proxy_port = http_proxy
+
         # connect
         self.ws = websocket.WebSocket(
             sslopt=ssl_opts,
-            enable_multithread=False  # ensure sync behavior
+            enable_multithread=False
         )
         self.ws.connect(
             url,
-            header={} if headers is None else headers
+            header={} if headers is None else headers,
+            http_proxy_host=http_proxy_host,
+            http_proxy_port=http_proxy_port,
+            http_proxy_auth=http_proxy_auth,
+            redirect_limit=32,
         )
 
     def read(self) -> str | bytes:
@@ -186,6 +197,15 @@ class BincallIo(GoofyIo):
             how long to wait in seconds before retrying a request to the bincall
             server.
 
+        headers (list | dict | None):
+            optional HTTP(S) request headers
+
+        http_proxy (tuple[str, int] | None):
+            optional HTTP proxy hostname and port
+
+        http_proxy_auth (tuple[str, str] | None):
+            optional username and password for the HTTP proxy
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -203,6 +223,9 @@ class BincallIo(GoofyIo):
     ssl_verify: bool
     n_retries: int
     retry_interval: float
+    headers: list | dict | None
+    http_proxy: tuple[str, int] | None
+    http_proxy_auth: tuple[str, str] | None
 
     _auth_code: str
 
@@ -233,6 +256,9 @@ class BincallIo(GoofyIo):
         ssl_verify: bool = True,
         n_retries: int = 10,
         retry_interval: float = 2.,
+        headers: list | dict | None = None,
+        http_proxy: tuple[str, int] | None = None,
+        http_proxy_auth: tuple[str, str] | None = None,
         log_level: int | None = None
     ):
         url = validate_server_url(url)
@@ -285,6 +311,9 @@ class BincallIo(GoofyIo):
         self.ssl_verify = ssl_verify
         self.n_retries = int(n_retries)
         self.retry_interval = float(retry_interval)
+        self.headers = headers
+        self.http_proxy = http_proxy
+        self.http_proxy_auth = http_proxy_auth
 
         if self.interval_max < self.interval_min:
             raise ValueError(
@@ -417,6 +446,9 @@ class BincallIo(GoofyIo):
                         "auth": self._auth_code,
                         "peer": self.call_mode.who_to_call
                     },
+                    headers=self.headers,
+                    http_proxy=self.http_proxy,
+                    http_proxy_auth=self.http_proxy_auth,
                     ssl_verify=self.ssl_verify
                 )
 
@@ -506,6 +538,9 @@ class BincallIo(GoofyIo):
                         "auth": self._auth_code,
                         "peer": self._peer_id
                     },
+                    headers=self.headers,
+                    http_proxy=self.http_proxy,
+                    http_proxy_auth=self.http_proxy_auth,
                     ssl_verify=self.ssl_verify
                 )
 
@@ -621,8 +656,13 @@ class BincallIo(GoofyIo):
         try:
             requests.get(
                 f"{self.url}{path}",
+                headers=self.headers,
                 timeout=20.,
-                allow_redirects=False,
+                allow_redirects=True,
+                proxies=_http_proxy_to_dict(
+                    self.http_proxy,
+                    self.http_proxy_auth
+                ),
                 verify=self.ssl_verify
             )
         except Exception:
@@ -637,8 +677,13 @@ class BincallIo(GoofyIo):
                 res = requests.get(
                     f"{self.url}{path}",
                     params,
+                    headers=self.headers,
                     timeout=20.,
-                    allow_redirects=False,
+                    allow_redirects=True,
+                    proxies=_http_proxy_to_dict(
+                        self.http_proxy,
+                        self.http_proxy_auth
+                    ),
                     verify=self.ssl_verify
                 )
 
@@ -670,25 +715,37 @@ def delete_account(
     url: str,
     id: str,
     password: str,
-    ssl_verify: bool = True
+    ssl_verify: bool = True,
+    headers: list | dict | None = None,
+    http_proxy: tuple[str, int] | None = None,
+    http_proxy_auth: tuple[str, str] | None = None
 ):
     """
     delete user account with given ID and password.
 
     Args:
 
-      url (str):
-          bincall server URL (HTTPS or HTTP) ending with a slash.
-          example: `https://example.com/bincall/`
+        url (str):
+            bincall server URL (HTTPS or HTTP) ending with a slash.
+            example: `https://example.com/bincall/`
 
-      id (str):
-          ID of the user account to delete.
+        id (str):
+            ID of the user account to delete.
 
-      password (str):
-          password for the provided user ID.
+        password (str):
+            password for the provided user ID.
 
-      ssl_verify (bool):
-          enable SSL certificate verification (recommended).
+        ssl_verify (bool):
+            enable SSL certificate verification (recommended).
+
+        headers (dict | None):
+            optional HTTP(s) request headers
+
+        http_proxy (tuple[str, int] | None):
+            optional HTTP proxy hostname and port
+
+        http_proxy_auth (tuple[str, str] | None):
+            optional username and password for the HTTP proxy
     """
 
     validate_server_url(url)
@@ -699,8 +756,13 @@ def delete_account(
     res = requests.get(
         f"{url}delete-acc",
         {"auth": auth_code},
+        headers=headers,
         timeout=20.,
-        allow_redirects=False,
+        allow_redirects=True,
+        proxies=_http_proxy_to_dict(
+            http_proxy,
+            http_proxy_auth
+        ),
         verify=ssl_verify
     )
     res = dict(res.json())
@@ -818,3 +880,23 @@ def insecure_decrypt(data: bytes, key: str) -> bytes:
     triggers, especially when using non-secure HTTP connections.
     """
     return _rc4_crypt(data, key.encode('utf-8'))
+
+
+def _http_proxy_to_dict(
+    http_proxy: tuple[str, int] | None = None,
+    http_proxy_auth: tuple[str, str] | None = None
+) -> dict | None:
+    if not http_proxy:
+        return None
+
+    if http_proxy_auth:
+        proxy_string = \
+            f"http://{http_proxy_auth[0]}:{http_proxy_auth[1]}" \
+            f"@{http_proxy[0]}:{http_proxy[1]}"
+    else:
+        proxy_string = f"http://{http_proxy[0]}:{http_proxy[1]}"
+
+    return {
+        "http": proxy_string,
+        "https": proxy_string
+    }
