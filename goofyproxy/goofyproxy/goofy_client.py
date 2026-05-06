@@ -174,27 +174,163 @@ class GoofyClient:
 
     _log: logging.Logger
 
-    io: GoofyIo
-    host: str
-    port: int
-    buf_size: int
-    backlog: int
-    timeout: float
-    bind_timeout: float
-    udp_timeout: float
-    poll_interval: float
-    send_interval: float
-    address_filter: str
-    address_filter_type: AddressFilterType
-    bypass_filter: str
-    bypass_filter_type: AddressFilterType
-    early_success: bool
-    enable_bind: bool
-    enable_udp_relay: bool
-    memory_limit_mib: float
+    _io: GoofyIo
+    _host: str
+    _port: int
+    _buf_size: int
+    _backlog: int
+    _timeout: float
+    _bind_timeout: float
+    _udp_timeout: float
+    _poll_interval: float
+    _send_interval: float
+    _address_filter: str
+    _address_filter_type: AddressFilterType
+    _bypass_filter: str
+    _bypass_filter_type: AddressFilterType
+    _early_success: bool
+    _enable_bind: bool
+    _enable_udp_relay: bool
+    _memory_limit_mib: float
+
+    @property
+    def io(self) -> GoofyIo:
+        return self._io
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @property
+    def buf_size(self) -> int:
+        return self._buf_size
+
+    @buf_size.setter
+    def buf_size(self, value: int):
+        self._buf_size = int(value)
+        self._sync_limits()
+
+    @property
+    def backlog(self) -> int:
+        return self._backlog
+
+    @property
+    def timeout(self) -> float:
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value: float):
+        self._timeout = float(value)
+        self._sync_limits()
+
+    @property
+    def bind_timeout(self) -> float:
+        return self._bind_timeout
+
+    @bind_timeout.setter
+    def bind_timeout(self, value: float):
+        self._bind_timeout = float(value)
+        self._sync_limits()
+
+    @property
+    def udp_timeout(self) -> float:
+        return self._udp_timeout
+
+    @udp_timeout.setter
+    def udp_timeout(self, value: float):
+        self._udp_timeout = float(value)
+        self._sync_limits()
+
+    @property
+    def poll_interval(self) -> float:
+        return self._poll_interval
+
+    @poll_interval.setter
+    def poll_interval(self, value: float):
+        self._poll_interval = float(value)
+
+    @property
+    def send_interval(self) -> float:
+        return self._send_interval
+
+    @send_interval.setter
+    def send_interval(self, value: float):
+        self._send_interval = float(value)
+
+    @property
+    def address_filter(self) -> str:
+        return self._address_filter
+
+    @address_filter.setter
+    def address_filter(self, value: str):
+        self._address_filter = str(value)
+
+    @property
+    def address_filter_type(self) -> AddressFilterType:
+        return self._address_filter_type
+
+    @address_filter_type.setter
+    def address_filter_type(self, value: AddressFilterType):
+        self._address_filter_type = AddressFilterType(value)
+
+    @property
+    def bypass_filter(self) -> str:
+        return self._bypass_filter
+
+    @bypass_filter.setter
+    def bypass_filter(self, value: str):
+        self._bypass_filter = str(value)
+
+    @property
+    def bypass_filter_type(self) -> AddressFilterType:
+        return self._bypass_filter_type
+
+    @bypass_filter_type.setter
+    def bypass_filter_type(self, value: AddressFilterType):
+        self._bypass_filter_type = AddressFilterType(value)
+
+    @property
+    def early_success(self) -> bool:
+        return self._early_success
+
+    @early_success.setter
+    def early_success(self, value: bool):
+        self._early_success = bool(value)
+
+    @property
+    def enable_bind(self) -> bool:
+        return self._enable_bind
+
+    @enable_bind.setter
+    def enable_bind(self, value: bool):
+        self._enable_bind = bool(value)
+
+    @property
+    def enable_udp_relay(self) -> bool:
+        return self._enable_udp_relay
+
+    @enable_udp_relay.setter
+    def enable_udp_relay(self, value: bool):
+        self._enable_udp_relay = bool(value)
+
+    @property
+    def memory_limit_mib(self) -> float:
+        return self._memory_limit_mib
+
+    @memory_limit_mib.setter
+    def memory_limit_mib(self, value: float):
+        self._memory_limit_mib = float(value)
 
     _server_sock: socket.socket | None = None
     _running: bool = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
 
     _sockets: dict[int, GoofyClientSocket]
     _sockets_lock: threading.Lock
@@ -277,24 +413,24 @@ class GoofyClient:
 
         self._log = make_logger(f"goofy client", log_level)
 
-        self.io = io
-        self.host = host
-        self.port = int(port)
-        self.buf_size = int(buf_size)
-        self.backlog = int(backlog)
-        self.timeout = float(timeout)
-        self.bind_timeout = float(bind_timeout)
-        self.udp_timeout = float(udp_timeout)
-        self.poll_interval = float(poll_interval)
-        self.send_interval = float(send_interval)
-        self.address_filter = address_filter
-        self.address_filter_type = address_filter_type
-        self.bypass_filter = bypass_filter
-        self.bypass_filter_type = bypass_filter_type
-        self.early_success = early_success
-        self.enable_bind = enable_bind
-        self.enable_udp_relay = enable_udp_relay
-        self.memory_limit_mib = float(memory_limit_mib)
+        self._io = io
+        self._host = host
+        self._port = int(port)
+        self._buf_size = int(buf_size)
+        self._backlog = int(backlog)
+        self._timeout = float(timeout)
+        self._bind_timeout = float(bind_timeout)
+        self._udp_timeout = float(udp_timeout)
+        self._poll_interval = float(poll_interval)
+        self._send_interval = float(send_interval)
+        self._address_filter = address_filter
+        self._address_filter_type = address_filter_type
+        self._bypass_filter = bypass_filter
+        self._bypass_filter_type = bypass_filter_type
+        self._early_success = early_success
+        self._enable_bind = enable_bind
+        self._enable_udp_relay = enable_udp_relay
+        self._memory_limit_mib = float(memory_limit_mib)
 
         self._sockets = {}
         self._sockets_lock = threading.Lock()
@@ -307,13 +443,13 @@ class GoofyClient:
 
         self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_sock.bind((self.host, self.port))
-        self._server_sock.listen(self.backlog)
+        self._server_sock.bind((self._host, self._port))
+        self._server_sock.listen(self._backlog)
         self._server_sock.settimeout(2.)
         self._running = True
 
-        msg = f"local SOCKS5 proxy server running on {self.host}:{self.port}"
-        if self.host == "0.0.0.0":
+        msg = f"local SOCKS5 proxy server running on {self._host}:{self._port}"
+        if self._host == "0.0.0.0":
             machine_ips = get_machine_ips()
             if machine_ips:
                 msg += f" ({", ".join(machine_ips)})"
@@ -368,32 +504,32 @@ class GoofyClient:
         finally:
             self.stop()
 
-    def running(self) -> bool:
-        return self._running
-
     def stop(self) -> None:
+        """stop the execution permanently and irreversibly."""
         if not self._running:
             return
-
         self._running = False
         if self._server_sock:
             close_socket(self._server_sock)
-
         self._log.info("stopped.")
 
-    def sync_limits(self):
+    def _sync_limits(self):
         """
         tell the goofy server to update its buffer size and timeouts to match
-        the most recent values. you should only call this if you change
-        `buf_size`, `timeout`, `bind_timeout`, or `udp_timeout` after the goofy
-        client has already started.
+        the most recent values.
         """
-        self._enqueue_outgoing_packet(GoofyCommandSetLimits(
-            self.buf_size,
-            self.timeout,
-            self.bind_timeout,
-            self.udp_timeout
+        force_acquire(self._outgoing_packet_queue_lock)
+        self._outgoing_packet_queue = list(filter(
+            lambda p: not isinstance(p, GoofyCommandSetLimits),
+            self._outgoing_packet_queue
         ))
+        self._outgoing_packet_queue.append(GoofyCommandSetLimits(
+            self._buf_size,
+            self._timeout,
+            self._bind_timeout,
+            self._udp_timeout
+        ))
+        self._outgoing_packet_queue_lock.release()
 
     def _handle_client(
         self,
@@ -404,7 +540,7 @@ class GoofyClient:
 
         global keyboard_interrupt
 
-        client.settimeout(self.timeout)
+        client.settimeout(self._timeout)
         try:
             # SOCKS5 handshake
             self._socks5_handshake(client)
@@ -429,13 +565,13 @@ class GoofyClient:
                 dst_addr = f"{dst_host}:{dst_port}"
                 if is_address_allowed(
                     dst_addr,
-                    self.address_filter,
-                    self.address_filter_type
+                    self._address_filter,
+                    self._address_filter_type
                 ):
                     if is_address_allowed(
                         dst_addr,
-                        self.bypass_filter,
-                        self.bypass_filter_type
+                        self._bypass_filter,
+                        self._bypass_filter_type
                     ):
                         # bypass
                         self._log.info(f"{cmd_name} (direct / bypassed)")
@@ -449,13 +585,13 @@ class GoofyClient:
                 else:
                     self._send_error_and_close(client, REP_CONN_REFUSED)
             elif cmd == CMD_BIND:
-                if self.enable_bind:
+                if self._enable_bind:
                     self._log.info(cmd_name)
                     self._cmd_bind(client, atyp, dst_host, dst_port)
                 else:
                     self._send_error_and_close(client, REP_GENERAL_FAILURE)
             elif cmd == CMD_UDP_ASSOCIATE:
-                if self.enable_udp_relay:
+                if self._enable_udp_relay:
                     self._log.info(cmd_name)
                     self._cmd_udp_associate(client, atyp, dst_host, dst_port)
                 else:
@@ -572,7 +708,10 @@ class GoofyClient:
             dst_port
         ))
 
-        if self.early_success:
+        # make a copy in case the original changes in the middle
+        early_success = self._early_success
+
+        if early_success:
             # lie to the client that we've already connected so it starts
             # sending its handshake or first message to be buffered. can save us
             # a whole round-trip to the goofy server.
@@ -592,7 +731,7 @@ class GoofyClient:
                 self._sockets_lock.release()
 
                 sock.status = GoofySocketStatus.Closed
-                if self.early_success:
+                if early_success:
                     close_socket(client)
                 else:
                     self._send_error_and_close(client, REP_GENERAL_FAILURE)
@@ -606,9 +745,9 @@ class GoofyClient:
 
             if status == GoofySocketStatus.WaitingToOpen:
                 # stop if we've been waiting for too long
-                if time.time() - time_start > self.timeout * 1.2:
+                if time.time() - time_start > self._timeout * 1.2:
                     sock.status = GoofySocketStatus.Closed
-                    if self.early_success:
+                    if early_success:
                         close_socket(client)
                     else:
                         self._send_error_and_close(
@@ -625,13 +764,13 @@ class GoofyClient:
                 # otherwise keep waiting
                 sock.lock.release()
                 self._sockets_lock.release()
-                time.sleep(self.poll_interval)
+                time.sleep(self._poll_interval)
                 continue
             elif fail_reply != -1:
                 # failed to open
 
                 sock.status = GoofySocketStatus.Closed
-                if self.early_success:
+                if early_success:
                     close_socket(client)
                 else:
                     self._send_error_and_close(client, fail_reply)
@@ -650,7 +789,7 @@ class GoofyClient:
                 break
             else:
                 sock.status = GoofySocketStatus.Closed
-                if self.early_success:
+                if early_success:
                     close_socket(client)
                 else:
                     self._send_error_and_close(client, REP_GENERAL_FAILURE)
@@ -662,7 +801,7 @@ class GoofyClient:
                 raise ValueError("unsupported socket status")
 
         # inform the client which local address the goofy server bound to
-        if not self.early_success:
+        if not early_success:
             self._send_reply(
                 client,
                 REP_SUCCESS,
@@ -707,7 +846,7 @@ class GoofyClient:
 
         # connect to the target address
         target = socket.socket(family, socket.SOCK_STREAM)
-        target.settimeout(self.timeout)
+        target.settimeout(self._timeout)
         try:
             target.connect(sockaddr)
         except ConnectionRefusedError as e:
@@ -746,7 +885,7 @@ class GoofyClient:
         while True:
             try:
                 readable, _, exceptional = select.select(
-                    sockets, [], sockets, self.timeout)
+                    sockets, [], sockets, self._timeout)
             except (ValueError, OSError):
                 break
 
@@ -756,7 +895,7 @@ class GoofyClient:
             for src in readable:
                 dst = b if src is a else a
                 try:
-                    data = src.recv(self.buf_size)
+                    data = src.recv(self._buf_size)
                     if not data:
                         return
                     dst.sendall(data)
@@ -816,7 +955,7 @@ class GoofyClient:
 
             if status == GoofySocketStatus.WaitingToOpen:
                 # stop if we've been waiting for longer than bind_timeout
-                if time.time() - time_start > self.bind_timeout * 1.2:
+                if time.time() - time_start > self._bind_timeout * 1.2:
                     sock.status = GoofySocketStatus.Closed
                     self._send_error_and_close(client, REP_GENERAL_FAILURE)
 
@@ -829,7 +968,7 @@ class GoofyClient:
                 # otherwise keep waiting
                 sock.lock.release()
                 self._sockets_lock.release()
-                time.sleep(self.poll_interval)
+                time.sleep(self._poll_interval)
                 continue
             elif fail_reply != -1:
                 # failed to bind
@@ -909,7 +1048,7 @@ class GoofyClient:
 
             if not sock.inbound_host:
                 # stop if we've been waiting for longer than bind_timeout
-                if time.time() - time_start > self.bind_timeout:
+                if time.time() - time_start > self._bind_timeout:
                     sock.status = GoofySocketStatus.Closed
                     self._send_error_and_close(client, REP_TTL_EXPIRED)
 
@@ -922,7 +1061,7 @@ class GoofyClient:
                 # otherwise keep waiting
                 sock.lock.release()
                 self._sockets_lock.release()
-                time.sleep(self.poll_interval)
+                time.sleep(self._poll_interval)
                 continue
             else:
                 self._sockets_lock.release()
@@ -1027,15 +1166,15 @@ class GoofyClient:
                     # ignore if the target address is blocked
                     if not is_address_allowed(
                         target_addr,
-                        self.address_filter,
-                        self.address_filter_type
+                        self._address_filter,
+                        self._address_filter_type
                     ):
                         continue
 
                     if is_address_allowed(
                         target_addr,
-                        self.bypass_filter,
-                        self.bypass_filter_type
+                        self._bypass_filter,
+                        self._bypass_filter_type
                     ):
                         try:
                             relay.sock.sendto(
@@ -1102,9 +1241,9 @@ class GoofyClient:
 
         # open the UDP relay socket on a random port
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_sock.settimeout(self.udp_timeout)
+        udp_sock.settimeout(self._udp_timeout)
         try:
-            udp_sock.bind((self.host, 0))
+            udp_sock.bind((self._host, 0))
             udp_host, udp_port = udp_sock.getsockname()
         except OSError as e:
             close_socket(udp_sock)
@@ -1148,7 +1287,7 @@ class GoofyClient:
         # block on the TCP control connection. when it closes, tear down UDP
         try:
             while True:
-                readable, _, _ = select.select([client], [], [], self.timeout)
+                readable, _, _ = select.select([client], [], [], self._timeout)
                 if readable:
                     # EOF on the control socket ends the session
                     if not client.recv(1):
@@ -1182,7 +1321,7 @@ class GoofyClient:
             correct_answer, welcome_byte = goofy_handshake_solve(question)
 
             # handshake: send the question followed by our version
-            self.io.send(
+            self._io.send(
                 question_len.to_bytes(1)
                 + question
                 + GOOFY_VERSION.to_bytes(4)
@@ -1192,7 +1331,7 @@ class GoofyClient:
                 return
 
             # handshake: receive the server's version and the answer's length
-            buf = self.io.receive(5)
+            buf = self._io.receive(5)
             server_version = int.from_bytes(buf[:4])
             answer_len = buf[-1]
 
@@ -1204,7 +1343,7 @@ class GoofyClient:
                 )
                 try:
                     # send 0 as welcome byte (always incorrect)
-                    self.io.send(b"\0")
+                    self._io.send(b"\0")
                 except Exception:
                     pass
                 self.stop()
@@ -1218,12 +1357,12 @@ class GoofyClient:
                 )
                 try:
                     # send 0 as welcome byte (always incorrect)
-                    self.io.send(b"\0")
+                    self._io.send(b"\0")
                 except Exception:
                     pass
                 self.stop()
                 return
-            answer = self.io.receive(answer_len)
+            answer = self._io.receive(answer_len)
 
             # handshake: verify the answer
             if answer != correct_answer:
@@ -1234,23 +1373,23 @@ class GoofyClient:
                 )
                 try:
                     # send 0 as welcome byte (always incorrect)
-                    self.io.send(b"\0")
+                    self._io.send(b"\0")
                 except Exception:
                     pass
                 self.stop()
                 return
 
             # handshake: send welcome byte
-            self.io.send(welcome_byte.to_bytes(1))
+            self._io.send(welcome_byte.to_bytes(1))
             self._log.info("goofy proxy handshake was successful")
 
             # send limits
             GoofyCommandSetLimits(
-                self.buf_size,
-                self.timeout,
-                self.bind_timeout,
-                self.udp_timeout
-            ).send(self.io)
+                self._buf_size,
+                self._timeout,
+                self._bind_timeout,
+                self._udp_timeout
+            ).send(self._io)
 
             # start the receive thread
             self._receive_thread = threading.Thread(
@@ -1289,7 +1428,7 @@ class GoofyClient:
 
                     try:
                         if is_ready_to_read(sock.client):
-                            data = sock.client.recv(self.buf_size)
+                            data = sock.client.recv(self._buf_size)
                             sock.last_io_time = time.time()
                             if not data:
                                 raise OSError()
@@ -1298,7 +1437,7 @@ class GoofyClient:
                                 socket_id,
                                 data
                             ))
-                        elif time.time() - sock.last_io_time > self.timeout:
+                        elif time.time() - sock.last_io_time > self._timeout:
                             raise TimeoutError()
 
                         if sock.status == GoofySocketStatus.Closed:
@@ -1323,13 +1462,13 @@ class GoofyClient:
                 for packet in packets_to_send:
                     data += packet.to_bytes()
                 if data:
-                    self.io.send(data)
+                    self._io.send(data)
 
                 # clean up memory if needed
                 self._cleanup_memory()
 
                 # chill out
-                time.sleep(self.send_interval)
+                time.sleep(self._send_interval)
 
             self._receive_thread.join()
         except BaseException as e:
@@ -1361,7 +1500,7 @@ class GoofyClient:
                     self._sockets_lock.release()
                     sockets_locked = False
 
-                packet = receive_goofy_packet(self.io)
+                packet = receive_goofy_packet(self._io)
 
                 force_acquire(self._sockets_lock)
                 sockets_locked = True
@@ -1617,7 +1756,7 @@ class GoofyClient:
 
         extra_bytes = int(
             asizeof(self._sockets, self._udp_relays)
-            - (self.memory_limit_mib * 1024. * 1024.)
+            - (self._memory_limit_mib * 1024. * 1024.)
         )
         initial_extra_bytes = extra_bytes
         if extra_bytes < 1:
