@@ -324,27 +324,32 @@ vice versa.
 - The request uses the POST HTTP method.
 
 - The request and response headers must set `Content-Type` to
-`application/octet-stream` and `Content-Length` to the number of bytes included
-in the request or response body (may be 0).
+`application/octet-stream` and `Content-Length` to the number of bytes in the
+request or response body (may be 0).
+
+- The request body contains optional data to send to the peer.
+
+- The response body uses the following binary format:
+
+1. [1 byte] number of bytes in the UTF-8 representation of the status message
+2. [N bytes] UTF-8 representation of the status message
+3. [4 bytes] number of bytes in data relayed from the peer
+4. [N bytes] data relayed from the peer, encrypted with ARC4 using the call key
 
 - If the request fails for any reason (authentication failure, invalid user ID,
-etc.), the server must set `bincall-status` to the fail reason in the response
-headers (e.g. `bincall-status: call ID must be a valid integer`). Otherwise,
-it must set it to `ok` unless another value is specified based on the rules
-below.
+etc.), the server must mention the fail reason in the status message. Otherwise,
+it must use status message `ok` unless another value is specified based on the
+rules below.
 
 - If the request body is not empty, the server must decrypt it with ARC4 using
 the call key and forward it to the peer using any method applicable.
 
-- If there is new data sent by the peer, the server must encrypt it with ARC4
-using the call key and include it in the response body.
+- The client can ask the server to end the call by setting URL parameter
+`end` to `1`. The server must then inform the peer that the call has ended using
+any method applicable.
 
-- The client can ask the server to end the call by setting `bincall-status` to
-`end` in the request headers. The server must then inform the peer that the call
-has ended using any method applicable.
-
-- If the call has ended, the server must set `bincall-status` to `end` in the
-response headers.
+- If the call has ended or is not found based on given call ID, the server must
+use status message `end`.
 
 ### URL parameters
 

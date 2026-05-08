@@ -434,23 +434,13 @@ async function handleRequest(
         const callIdParam = url.searchParams.get('call-id');
 
         if (authParam == null || peerParam == null || callIdParam == null) {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': 0,
-                'bincall-status': 'missing parameters'
-            });
-            res.end();
+            writeHttpChunkResponse(res, 'missing parameters');
             return;
         }
 
         const { authResult, userId } = await authenticate(authParam)
         if (authResult !== "ok") {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': 0,
-                'bincall-status': `${authResult}`
-            });
-            res.end();
+            writeHttpChunkResponse(res, `${authResult}`);
             return;
         }
 
@@ -458,12 +448,7 @@ async function handleRequest(
         try {
             callId = parseInt(callIdParam);
         } catch (error) {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': 0,
-                'bincall-status': 'call-id must be a valid integer'
-            });
-            res.end();
+            writeHttpChunkResponse(res, 'call-id must be a valid integer');
             return;
         }
 
@@ -471,21 +456,11 @@ async function handleRequest(
         const matchedCalls = currentCalls.filter(c => c.id === callId);
         release2();
         if (matchedCalls.length < 1) {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': 0,
-                'bincall-status': 'end'
-            });
-            res.end();
+            writeHttpChunkResponse(res, 'end');
             return;
         }
         if (matchedCalls.length > 1) {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': 0,
-                'bincall-status': 'duplicated call ID'
-            });
-            res.end();
+            writeHttpChunkResponse(res, 'duplicated call ID');
             return;
         }
         const call = matchedCalls[0];
@@ -509,22 +484,12 @@ async function handleRequest(
         } else if (userId === call.user0 && peerParam === call.user1) {
             call.user0LastActivity = Date.now();
         } else {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': 0,
-                'bincall-status': 'invalid user ID or peer ID'
-            });
-            res.end();
+            writeHttpChunkResponse(res, 'invalid user ID or peer ID');
             return;
         }
 
         if (call.endedAfterEmptyPacket) {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': 0,
-                'bincall-status': 'end'
-            });
-            res.end();
+            writeHttpChunkResponse(res, 'end');
             return;
         }
 
@@ -537,24 +502,24 @@ async function handleRequest(
                 const reqBody = await readRequestBodyAsBuffer(req);
                 if (reqBody.byteLength > 0) {
                     const release = await myPakcetsMutex.acquire();
-                    myPackets.push(insecureDecrypt(reqBody, callKey))
-                    release()
+                    myPackets.push(insecureDecrypt(reqBody, callKey));
+                    release();
                 }
             }
         } catch (error) {
             console.error(`Failed to write packet in http-chunk (${userId} -> ${theirId}):`, error);
         }
 
-        if (req.headers['bincall-status'] === 'end') {
+        if (url.searchParams.get('end') === '1') {
             endIt = true;
             const release = await myPakcetsMutex.acquire();
             myPackets.push(Buffer.alloc(0))
-            release()
+            release();
         }
 
         // relay from peer to client
-        let peerData = Buffer.alloc(0);
-        let release: MutexInterface.Releaser | null = null
+        let peerData: Buffer = Buffer.alloc(0);
+        let release: MutexInterface.Releaser | null = null;
         try {
             release = await theirPakcetsMutex.acquire();
             if (theirPackets.length > 0 || call.endedAfterEmptyPacket) {
@@ -569,7 +534,7 @@ async function handleRequest(
                             call.endedAfterEmptyPacket = true;
                             break;
                         }
-                        peerData = Buffer.concat([peerData, packet])
+                        peerData = Buffer.concat([peerData, packet]);
                     }
                 }
                 theirPackets.length = 0;
@@ -587,26 +552,55 @@ async function handleRequest(
                 error
             );
         }
+        if (peerData.byteLength > 0) {
+            peerData = insecureEncrypt(peerData, callKey);
+        }
 
         if (endIt) {
             await removeCall(userId, theirId);
         }
 
-        res.writeHead(200, {
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': peerData.length,
-            'bincall-status': endIt ? 'end' : 'ok'
-        });
-        if (peerData.length > 0) {
-            res.write(insecureEncrypt(peerData, callKey));
-        }
-        res.end();
+        writeHttpChunkResponse(
+            res,
+            endIt ? 'end' : 'ok',
+            peerData
+        );
         return;
     }
 
     // Default: serve HTML page
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(defaultHtml);
+}
+
+function writeHttpChunkResponse(
+    res: ServerResponse,
+    status: string,
+    data: Buffer | null = null
+) {
+    const statusBytes = Buffer.from(status);
+    if (statusBytes.byteLength > 65535) {
+        throw new Error("status message too long");
+    }
+
+    const part0 = Buffer.alloc(2);
+    part0.writeUInt16BE(statusBytes.byteLength, 0);
+
+    const part1 = statusBytes;
+
+    const dataResolved = (data == null) ? Buffer.alloc(0) : data;
+    const part2 = Buffer.alloc(4);
+    part2.writeUInt32BE(dataResolved.byteLength);
+
+    const part3 = dataResolved;
+
+    const combined = Buffer.concat([part0, part1, part2, part3]);
+
+    res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': combined.byteLength
+    });
+    res.end(combined);
 }
 
 async function makeCall(

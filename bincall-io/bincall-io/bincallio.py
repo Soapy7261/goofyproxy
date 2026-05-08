@@ -453,12 +453,12 @@ class BincallIo(GoofyIo):
                         {
                             "auth": self._auth_code,
                             "peer": self._peer_id,
-                            "call-id": self._call_id
+                            "call-id": self._call_id,
+                            "end": "1"
                         },
                         {
                             "Content-Type": "application/octet-stream",
-                            "Content-Length": "0",
-                            "bincall-status": "end"
+                            "Content-Length": "0"
                         },
                         True
                     )
@@ -682,27 +682,50 @@ class BincallIo(GoofyIo):
                     self._handle_in_data(data)
                 else:
                     out_data = self._prepare_outgoing_packet()
+
+                    params = {
+                        "auth": self._auth_code,
+                        "peer": self._peer_id,
+                        "call-id": self._call_id
+                    }
+                    if self._stopping:
+                        params["end"] = "1"
+
                     res = self._request(
                         "http-chunk",
-                        {
-                            "auth": self._auth_code,
-                            "peer": self._peer_id,
-                            "call-id": self._call_id
-                        },
+                        params,
                         {
                             "Content-Type": "application/octet-stream",
-                            "Content-Length": str(len(out_data)),
-                            "bincall-status": "end" if self._stopping else ""
+                            "Content-Length": str(len(out_data))
                         },
                         True,
                         out_data
-                    )
-                    res_status = res.headers["bincall-status"]
-                    if res_status == "ok":
-                        self._handle_in_data(res.content)
-                    elif res_status == "end":
+                    ).content
+                    if not isinstance(res, bytes):
+                        raise ValueError(
+                            f"invalid http-chunk response type ({type(res)})"
+                        )
+                    if len(res) < 6:
+                        raise ValueError(
+                            f"http-chunk response too small ({len(res)} < 6)"
+                        )
+
+                    status_len = int.from_bytes(res[:2])
+                    res = res[2:]
+
+                    res_status = res[:status_len].decode()
+                    res = res[status_len:]
+
+                    data_len = int.from_bytes(res[:4])
+                    res = res[4:]
+
+                    data = res[:data_len]
+                    res = res[data_len:]
+
+                    self._handle_in_data(data)
+                    if res_status == "end":
                         raise ConnectionError("call ended by the server")
-                    else:
+                    elif res_status != "ok":
                         raise ConnectionError(f"http-chunk: {res_status}")
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
