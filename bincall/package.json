@@ -1,7 +1,7 @@
 {
     "name": "bincall-server",
     "version": "1.0.0",
-    "description": "bincall server implementation (binary call service)",
+    "description": "bincall 1.0 server implementation (binary call service)",
     "main": "server.ts",
     "scripts": {
         "build": "tsc",

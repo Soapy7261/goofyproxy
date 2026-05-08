@@ -6,9 +6,11 @@ binary calls.
 import time
 import threading
 import random
+from typing import NamedTuple
+from enum import IntEnum
+from collections.abc import Callable
 import gzip
 import base64
-from typing import NamedTuple
 import logging
 
 import requests
@@ -17,6 +19,7 @@ import websocket
 import ssl
 from urllib.parse import urlencode
 import urllib3
+import json
 
 from goofyproxy import GoofyIo
 from goofyproxy.common import *
@@ -92,7 +95,7 @@ class WsClient:
             raise ConnectionError("WebSocket is not connected")
         return self.ws.recv()
 
-    def send(self, data):
+    def send(self, data: str | bytes):
         """
         send data through the WebSocket.
 
@@ -100,7 +103,7 @@ class WsClient:
             data (str | bytes): what to send
         """
         if not self.ws.connected:
-            raise RuntimeError("WebSocket is not connected")
+            raise ConnectionError("WebSocket is not connected")
         if isinstance(data, bytes):
             # binary frame
             self.ws.send_binary(data)
@@ -147,6 +150,16 @@ class CalleeMode(NamedTuple):
     if True, will accept incoming calls from anyone except the IDs in
     `accept_calls_from`.
     """
+
+
+class ConnectionMode(IntEnum):
+    WebSocket = 0
+    Http = 1
+
+
+class ConnectionModePreference(IntEnum):
+    PreferWebSocket = 0
+    PreferHttp = 1
 
 
 class BincallIo(GoofyIo):
@@ -206,6 +219,16 @@ class BincallIo(GoofyIo):
         http_proxy_auth (tuple[str, str] | None):
             optional username and password for the HTTP proxy
 
+        connection_mode_preference (ConnectionModePreference):
+            which connection mode to prefer for calls if the server supports
+            more than one.
+
+        compress (bool):
+            compress outgoing data if it's worth it and decompress incoming data
+            if it's marked as compressed. NOTE: this is not a part of the
+            official bincall API and will only work with peers who are also
+            using BincallIo with this parameter enabled.
+
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -226,12 +249,16 @@ class BincallIo(GoofyIo):
     headers: list | dict | None
     http_proxy: tuple[str, int] | None
     http_proxy_auth: tuple[str, str] | None
+    connection_mode_preference: ConnectionModePreference
+    compress: bool
 
     _auth_code: str
+    _connection_mode: ConnectionMode = ConnectionMode.WebSocket
 
     _out_buf: bytearray
     _out_buf_lock: threading.Lock
 
+    _raw_in_buf: bytearray
     _in_buf: bytearray
     _in_buf_lock: threading.Lock
 
@@ -241,6 +268,7 @@ class BincallIo(GoofyIo):
     _peer_id: str | None = None
     _call_timestamp: int = 0
     _ws: WsClient | None = None
+    _call_id: str | None = None
     _call_key: str | None = None
 
     def __init__(
@@ -255,18 +283,21 @@ class BincallIo(GoofyIo):
         warm_up: bool = True,
         ssl_verify: bool = True,
         n_retries: int = 10,
-        retry_interval: float = 2.,
+        retry_interval: float = 3.,
         headers: list | dict | None = None,
         http_proxy: tuple[str, int] | None = None,
         http_proxy_auth: tuple[str, str] | None = None,
+        connection_mode_preference: ConnectionModePreference =
+            ConnectionModePreference.PreferWebSocket,
+        compress: bool = False,
         log_level: int | None = None
     ):
-        url = validate_server_url(url)
-        validate_id(id)
-        validate_password(password)
+        url = _validate_server_url(url)
+        _validate_id(id)
+        _validate_password(password)
 
         if isinstance(call_mode, CallerMode):
-            validate_id(call_mode.who_to_call)
+            _validate_id(call_mode.who_to_call)
             if call_mode.who_to_call == id:
                 raise ValueError(
                     f"call_mode.who_to_call and id must be different (both are "
@@ -279,7 +310,7 @@ class BincallIo(GoofyIo):
                     f"{type(call_mode.accept_calls_from)}."
                 )
             for peer_id in call_mode.accept_calls_from:
-                validate_id(peer_id)
+                _validate_id(peer_id)
                 if peer_id == id:
                     raise ValueError(
                         "all user IDs in call_mode.accept_calls_from must be "
@@ -314,6 +345,9 @@ class BincallIo(GoofyIo):
         self.headers = headers
         self.http_proxy = http_proxy
         self.http_proxy_auth = http_proxy_auth
+        self.connection_mode_preference = \
+            ConnectionModePreference(connection_mode_preference)
+        self.compress = compress
 
         if self.interval_max < self.interval_min:
             raise ValueError(
@@ -348,12 +382,13 @@ class BincallIo(GoofyIo):
 
         self._out_buf = bytearray()
         self._out_buf_lock = threading.Lock()
+        self._raw_in_buf = bytearray()
         self._in_buf = bytearray()
         self._in_buf_lock = threading.Lock()
 
         # authentication
 
-        self._auth_code = generate_auth_code(self.id, self.password)
+        self._auth_code = _generate_auth_code(self.id, self.password)
         res = self._request_json(
             "authenticate",
             {"auth": self._auth_code}
@@ -366,6 +401,26 @@ class BincallIo(GoofyIo):
             self._log.info("authentication was successful (created new user)")
         else:
             raise BincallIoError(f"authentication failed: {auth_result}")
+
+        # get server connection modes
+        res = self._request_json("connection-modes")
+        server_connection_modes: list[str] = res["connectionModes"]
+        supports_websocket = "websocket" in server_connection_modes
+        supports_http = "http" in server_connection_modes
+        if supports_websocket and supports_http:
+            if self.connection_mode_preference == \
+                    ConnectionModePreference.PreferWebSocket:
+                self._connection_mode = ConnectionMode.WebSocket
+            else:
+                self._connection_mode = ConnectionMode.Http
+        elif supports_websocket:
+            self._connection_mode = ConnectionMode.WebSocket
+        elif supports_http:
+            self._connection_mode = ConnectionMode.Http
+        else:
+            raise BincallIoError(
+                "the server does not support WebSocket or HTTP connection modes"
+            )
 
         # continue in a separate thread
         self._thread = threading.Thread(
@@ -389,7 +444,25 @@ class BincallIo(GoofyIo):
 
         self._stopping = True
         try:
-            self._ws.shutdown()
+            if self._connection_mode == ConnectionMode.WebSocket and self._ws:
+                self._ws.shutdown()
+            elif self._connection_mode == ConnectionMode.Http and self._call_id:
+                _do_in_thread_ignoring_exceptions(
+                    lambda _: self._request(
+                        "http-chunk",
+                        {
+                            "auth": self._auth_code,
+                            "peer": self._peer_id,
+                            "call-id": self._call_id
+                        },
+                        {
+                            "Content-Type": "application/octet-stream",
+                            "Content-Length": "0",
+                            "bincall-status": "end"
+                        },
+                        True
+                    )
+                )
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except Exception:
@@ -439,28 +512,47 @@ class BincallIo(GoofyIo):
 
             if isinstance(self.call_mode, CallerMode):
                 # call the peer
-                self._log.info(f"calling peer {self.call_mode.who_to_call}")
-                self._ws = WsClient(
-                    f"{self.url}call",
-                    {
-                        "auth": self._auth_code,
-                        "peer": self.call_mode.who_to_call
-                    },
-                    headers=self.headers,
-                    http_proxy=self.http_proxy,
-                    http_proxy_auth=self.http_proxy_auth,
-                    ssl_verify=self.ssl_verify
-                )
-
-                msg = self._ws.read()
-                prefix = "call-start-"
-                if msg.startswith(prefix):
-                    self._call_key = msg[len(prefix):]
-                    self._log.info("call started")
-                else:
-                    raise ConnectionAbortedError(
-                        f"couldn't start call: {msg}"
+                self._peer_id = self.call_mode.who_to_call
+                if self._connection_mode == ConnectionMode.WebSocket:
+                    self._log.info(
+                        f"calling peer {self._peer_id} (WebSocket)"
                     )
+                    self._ws = WsClient(
+                        f"{self.url}call",
+                        {
+                            "auth": self._auth_code,
+                            "peer": self._peer_id
+                        },
+                        headers=self.headers,
+                        http_proxy=self.http_proxy,
+                        http_proxy_auth=self.http_proxy_auth,
+                        ssl_verify=self.ssl_verify
+                    )
+                    msg = self._ws.read()
+                    self._handle_call_result(msg)
+                else:
+                    self._log.info(
+                        f"calling peer {self._peer_id} (HTTP)"
+                    )
+
+                    res = self._request(
+                        "call-http",
+                        {
+                            "auth": self._auth_code,
+                            "peer": self._peer_id
+                        }
+                    ).text
+                    while res and not (
+                        res.startswith("[") or res.startswith("{")
+                    ):
+                        res = res[1:]
+
+                    j = json.loads(res)
+                    if not isinstance(j, dict):
+                        raise ValueError("response JSON is not a dict")
+
+                    result: str = j["result"]
+                    self._handle_call_result(result)
             elif isinstance(self.call_mode, CalleeMode):
                 # wait for an incoming call
 
@@ -531,28 +623,37 @@ class BincallIo(GoofyIo):
                     else:
                         break
 
-                self._log.info(f"answering incoming call from {self._peer_id}")
-                self._ws = WsClient(
-                    f"{self.url}pickup",
-                    {
-                        "auth": self._auth_code,
-                        "peer": self._peer_id
-                    },
-                    headers=self.headers,
-                    http_proxy=self.http_proxy,
-                    http_proxy_auth=self.http_proxy_auth,
-                    ssl_verify=self.ssl_verify
-                )
-
-                msg = self._ws.read()
-                prefix = "call-start-"
-                if msg.startswith(prefix):
-                    self._call_key = msg[len(prefix):]
-                    self._log.info("call started")
-                else:
-                    raise ConnectionAbortedError(
-                        f"couldn't start call: {msg}"
+                if self._connection_mode == ConnectionMode.WebSocket:
+                    self._log.info(
+                        f"answering incoming call from {self._peer_id} "
+                        f"(WebSocket)"
                     )
+                    self._ws = WsClient(
+                        f"{self.url}pickup",
+                        {
+                            "auth": self._auth_code,
+                            "peer": self._peer_id
+                        },
+                        headers=self.headers,
+                        http_proxy=self.http_proxy,
+                        http_proxy_auth=self.http_proxy_auth,
+                        ssl_verify=self.ssl_verify
+                    )
+                    msg = self._ws.read()
+                    self._handle_call_result(msg)
+                else:
+                    self._log.info(
+                        f"answering incoming call from {self._peer_id} "
+                        f"(HTTP)"
+                    )
+                    result: str = self._request_json(
+                        "pickup-http",
+                        {
+                            "auth": self._auth_code,
+                            "peer": self._peer_id
+                        }
+                    )["result"]
+                    self._handle_call_result(result)
 
             # send and receive
             while not self._stopping:
@@ -561,9 +662,48 @@ class BincallIo(GoofyIo):
                     + random.random() * (self.interval_max - self.interval_min)
                 )
 
-                self._send_packet_if_needed()
-                if is_ready_to_read(self._ws.ws.sock):
-                    self._read_packet()
+                if self._connection_mode == ConnectionMode.WebSocket:
+                    out_data = self._prepare_outgoing_packet()
+                    if out_data:
+                        self._ws.send(out_data)
+
+                    if not is_ready_to_read(self._ws.ws.sock):
+                        continue
+                    data = self._ws.read()
+                    if isinstance(data, str):
+                        self._log.warning(
+                            f"received text frame: \"{data}\""
+                        )
+                        continue
+                    elif not isinstance(data, bytes):
+                        raise ValueError(
+                            "received data is neither a str or bytes"
+                        )
+                    self._handle_in_data(data)
+                else:
+                    out_data = self._prepare_outgoing_packet()
+                    res = self._request(
+                        "http-chunk",
+                        {
+                            "auth": self._auth_code,
+                            "peer": self._peer_id,
+                            "call-id": self._call_id
+                        },
+                        {
+                            "Content-Type": "application/octet-stream",
+                            "Content-Length": str(len(out_data)),
+                            "bincall-status": "end" if self._stopping else ""
+                        },
+                        True,
+                        out_data
+                    )
+                    res_status = res.headers["bincall-status"]
+                    if res_status == "ok":
+                        self._handle_in_data(res.content)
+                    elif res_status == "end":
+                        raise ConnectionError("call ended by the server")
+                    else:
+                        raise ConnectionError(f"http-chunk: {res_status}")
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
@@ -571,17 +711,17 @@ class BincallIo(GoofyIo):
         finally:
             self.stop()
 
-    def _send_packet_if_needed(self):
+    def _prepare_outgoing_packet(self) -> bytes:
         if self._stopping:
-            return
+            return bytes()
 
         force_acquire(self._out_buf_lock)
 
-        # use compression if it's worth it
+        # use compression if it's worth it (and enabled)
         data_orig_size = self.max_out_packet_size
         data = bytes(self._out_buf[:data_orig_size])
         is_compressed = False
-        if len(self._out_buf) > self.max_out_packet_size:
+        if self.compress and len(self._out_buf) > self.max_out_packet_size:
             orig_size = self.max_out_packet_size * 3
             temp = gzip.compress(self._out_buf[:orig_size])
             if len(temp) < self.max_out_packet_size:
@@ -610,46 +750,66 @@ class BincallIo(GoofyIo):
         self._out_buf_lock.release()
 
         if not data:
-            return
+            return bytes()
 
-        if is_compressed:
-            data = b"C" + data
-        else:
-            data = b"c" + data
+        if self.compress:
+            # compression marker
+            if is_compressed:
+                data = b"C" + data
+            else:
+                data = b"c" + data
+
+            # length
+            data = len(data).to_bytes(4) + data
 
         # obfuscate
-        data = insecure_encrypt(data, self._call_key)
+        data = _insecure_encrypt(data, self._call_key)
 
         if self._stopping:
-            return
-        self._ws.send(data)
+            return bytes()
+        return data
 
-    def _read_packet(self):
-        if self._stopping:
-            return
-
-        data = self._ws.read()
-        if isinstance(data, str):
-            self._log.warning(f"received text frame: \"{data}\"")
-            return
-        elif not isinstance(data, bytes):
-            raise ValueError("received data is neither a str or bytes")
-
-        if not data:
+    def _handle_in_data(self, data: bytes):
+        if self._stopping or not data:
             return
 
         # de-obfuscate
-        data = insecure_decrypt(data, self._call_key)
+        data = _insecure_decrypt(data, self._call_key)
 
-        # decompress if needed
-        if data[0] == b"C":
-            data = gzip.decompress(data[1:])
-        else:
-            data = data[1:]
+        if not self.compress:
+            # add to the input buffer directly
+            force_acquire(self._in_buf_lock)
+            self._in_buf += data
+            self._in_buf_lock.release()
+            return
 
-        # push data to the input buffer
+        # add to the raw input buffer
+        self._raw_in_buf += data
+
+        # read complete packets from the raw input buffer
         force_acquire(self._in_buf_lock)
-        self._in_buf += data
+        while True:
+            # first 4 bytes represent the length of the packet
+            if len(self._raw_in_buf) < 4:
+                break
+            data_len = int.from_bytes(self._raw_in_buf[:4])
+
+            # stop if incomplete
+            if len(self._raw_in_buf) < 4 + data_len:
+                break
+
+            # read complete packet
+            packet = self._raw_in_buf[4:4 + data_len]
+            self._raw_in_buf = self._raw_in_buf[4 + data_len:]
+
+            # decompress if needed
+            if packet[0] == b"C":
+                packet = gzip.decompress(packet[1:])
+            else:
+                packet = packet[1:]
+
+            # add to the actual input buffer
+            self._in_buf += packet
         self._in_buf_lock.release()
 
     def _dummy_request(self, path: str):
@@ -668,24 +828,51 @@ class BincallIo(GoofyIo):
         except Exception:
             pass
 
-    def _request(self, path: str, params: dict) -> requests.Response:
+    def _request(
+        self,
+        path: str,
+        params: dict | None = None,
+        extra_headers: dict | None = None,
+        post: bool = False,
+        data: bytes | None = None
+    ) -> requests.Response:
+        headers = {} if self.headers is None else self.headers
+        if extra_headers is not None:
+            headers.update(extra_headers)
+
         for i in range(self.n_retries + 1):
             try:
                 if i > 0:
                     time.sleep(self.retry_interval)
 
-                res = requests.get(
-                    f"{self.url}{path}",
-                    params,
-                    headers=self.headers,
-                    timeout=20.,
-                    allow_redirects=True,
-                    proxies=_http_proxy_to_dict(
-                        self.http_proxy,
-                        self.http_proxy_auth
-                    ),
-                    verify=self.ssl_verify
-                )
+                if post:
+                    res = requests.post(
+                        f"{self.url}{path}",
+                        data=data,
+                        params=params,
+                        headers=headers,
+                        timeout=20.,
+                        allow_redirects=True,
+                        proxies=_http_proxy_to_dict(
+                            self.http_proxy,
+                            self.http_proxy_auth
+                        ),
+                        verify=self.ssl_verify
+                    )
+                else:
+                    res = requests.get(
+                        f"{self.url}{path}",
+                        params=params,
+                        data=data,
+                        headers=headers,
+                        timeout=20.,
+                        allow_redirects=True,
+                        proxies=_http_proxy_to_dict(
+                            self.http_proxy,
+                            self.http_proxy_auth
+                        ),
+                        verify=self.ssl_verify
+                    )
 
                 if res.status_code != 200:
                     try:
@@ -704,11 +891,26 @@ class BincallIo(GoofyIo):
                 )
         raise ConnectionError(f"too many failures in \"{path}\"")
 
-    def _request_json(self, path: str, params: dict) -> dict:
+    def _request_json(self, path: str, params: dict | None = None) -> dict:
         j = self._request(path, params).json()
         if not isinstance(j, dict):
             raise ValueError("response JSON is not a dict")
         return j
+
+    def _handle_call_result(self, msg: str):
+        prefix = "call-start#"
+        if msg.startswith(prefix):
+            parts = msg[len(prefix):].split("#")
+            if len(parts) < 2:
+                raise ValueError(
+                    f"not enough parts in call-start message \"{msg}\""
+                )
+            self._call_id, self._call_key = parts[:2]
+            self._log.info(f"call started (ID: {self._call_id})")
+        else:
+            raise ConnectionAbortedError(
+                f"couldn't start call: {msg}"
+            )
 
 
 def delete_account(
@@ -748,11 +950,11 @@ def delete_account(
             optional username and password for the HTTP proxy
     """
 
-    validate_server_url(url)
-    validate_id(id)
-    validate_password(password)
+    _validate_server_url(url)
+    _validate_id(id)
+    _validate_password(password)
 
-    auth_code = generate_auth_code(id, password)
+    auth_code = _generate_auth_code(id, password)
     res = requests.get(
         f"{url}delete-acc",
         {"auth": auth_code},
@@ -782,7 +984,7 @@ ID_VALID_CHARS = \
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 
 
-def validate_server_url(url: str) -> str:
+def _validate_server_url(url: str) -> str:
     if not url.endswith("/"):
         raise ValueError("server URL must end with \"/\"")
 
@@ -799,7 +1001,7 @@ def validate_server_url(url: str) -> str:
     )
 
 
-def validate_id(id: str):
+def _validate_id(id: str):
     try:
         if not isinstance(id, str):
             raise Exception(
@@ -822,7 +1024,7 @@ def validate_id(id: str):
         )
 
 
-def validate_password(password: str):
+def _validate_password(password: str):
     if not isinstance(password, str):
         raise ValueError("password must be a string")
     if len(password) < 10:
@@ -831,9 +1033,9 @@ def validate_password(password: str):
         raise ValueError("password cannot contain more than 64 characters")
 
 
-def generate_auth_code(id: str, password: str) -> str:
-    validate_id(id)
-    validate_password(password)
+def _generate_auth_code(id: str, password: str) -> str:
+    _validate_id(id)
+    _validate_password(password)
     id = id.encode()
     password = password.encode()
 
@@ -862,7 +1064,7 @@ def _rc4_crypt(data: bytes, key: bytes) -> bytes:
     return bytes(out)
 
 
-def insecure_encrypt(data: bytes, key: str) -> bytes:
+def _insecure_encrypt(data: bytes, key: str) -> bytes:
     """
     encrypt (obfuscate) binary data with the given key.
 
@@ -872,7 +1074,7 @@ def insecure_encrypt(data: bytes, key: str) -> bytes:
     return _rc4_crypt(data, key.encode('utf-8'))
 
 
-def insecure_decrypt(data: bytes, key: str) -> bytes:
+def _insecure_decrypt(data: bytes, key: str) -> bytes:
     """
     decrypt (identical operation for a stream cipher)
 
@@ -900,3 +1102,27 @@ def _http_proxy_to_dict(
         "http": proxy_string,
         "https": proxy_string
     }
+
+
+def _ignore_exceptions(do_what: Callable[[], None]):
+    global keyboard_interrupt
+    try:
+        do_what()
+    except KeyboardInterrupt as e:
+        keyboard_interrupt = e
+    except BaseException:
+        pass
+
+
+def _do_in_thread_ignoring_exceptions(do_what: Callable[[], None]):
+    global keyboard_interrupt
+    try:
+        threading.Thread(
+            target=_ignore_exceptions,
+            args=(do_what,),
+            daemon=True
+        ).start()
+    except KeyboardInterrupt as e:
+        keyboard_interrupt = e
+    except BaseException:
+        pass

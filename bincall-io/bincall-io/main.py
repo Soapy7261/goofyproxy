@@ -3,12 +3,14 @@ from enum import StrEnum
 from typing import Self
 import logging
 import argparse
+import json
 
 from goofyproxy import GoofyServer, GoofyClient, AddressFilterType, \
     ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN
 import goofyproxy.common as goofycommon
 
-from bincallio import BincallIo, CallerMode, CalleeMode, delete_account
+from bincallio import BincallIo, CallerMode, CalleeMode, \
+    ConnectionModePreference, delete_account
 
 
 def run(args: argparse.Namespace):
@@ -16,12 +18,51 @@ def run(args: argparse.Namespace):
         print(ADDRESS_FILTER_HELP)
         return
 
+    headers: list | dict | None = None
+    if args.headers:
+        try:
+            headers = json.loads(args.headers)
+        except Exception as e:
+            raise ValueError(
+                f"failed to parse headers from \"{args.headers}\": "
+                f"{goofycommon.format_exception(e)}"
+            )
+
+    http_proxy: tuple[str, int] | None = None
+    if args.proxy:
+        try:
+            host, port = str(args.proxy).rsplit(":", 1)
+            http_proxy = (host, int(port))
+        except Exception as e:
+            raise ValueError(
+                f"failed to parse HTTP proxy hostname and port from "
+                f"\"{args.proxy}\": {goofycommon.format_exception(e)}"
+            )
+
+    http_proxy_auth: tuple[str, str] | None = None
+    if args.proxy_auth:
+        try:
+            username, password = str(args.proxy_auth).split(":", 1)
+            http_proxy_auth = (username, password)
+        except Exception as e:
+            raise ValueError(
+                f"failed to parse HTTP proxy username and password: "
+                f"{goofycommon.format_exception(e)}"
+            )
+
+    connection_mode_preference = ConnectionModePreference.PreferWebSocket
+    if args.prefer_http:
+        connection_mode_preference = ConnectionModePreference.PreferHttp
+
     if args.command == "delete-acc":
         delete_account(
             url=args.url,
             id=args.id,
             password=args.password,
             ssl_verify=not args.no_ssl_verify,
+            headers=headers,
+            http_proxy=http_proxy,
+            http_proxy_auth=http_proxy_auth
         )
         return
 
@@ -55,7 +96,12 @@ def run(args: argparse.Namespace):
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
                 n_retries=args.retries,
-                retry_interval=args.retry_interval
+                retry_interval=args.retry_interval,
+                headers=headers,
+                http_proxy=http_proxy,
+                http_proxy_auth=http_proxy_auth,
+                connection_mode_preference=connection_mode_preference,
+                compress=True
             )
 
             GoofyServer(
@@ -96,7 +142,12 @@ def run(args: argparse.Namespace):
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
                 n_retries=args.retries,
-                retry_interval=args.retry_interval
+                retry_interval=args.retry_interval,
+                headers=headers,
+                http_proxy=http_proxy,
+                http_proxy_auth=http_proxy_auth,
+                connection_mode_preference=connection_mode_preference,
+                compress=True
             )
 
             GoofyClient(
@@ -333,14 +384,43 @@ def main():
             help=f"[{default=}] how many times to retry when a request to the "
             "bincall server fails."
         )
-        default = 2.
+        default = 3.
         p.add_argument(
             "-t",
             "--retry-interval",
-            type=int,
+            type=float,
             default=default,
             help=f"[{default=}] how long to wait in seconds before retrying a "
             "request to the bincall server."
+        )
+
+    for p in (parser_server, parser_client, parser_delete_acc):
+        p.add_argument(
+            "-H",
+            "--headers",
+            type=str,
+            help="optional HTTP headers in JSON format to use in requests to "
+            "the bincall server."
+        )
+        p.add_argument(
+            "-R",
+            "--proxy",
+            type=str,
+            help="optional HTTP proxy hostname and port separated by a colon."
+        )
+        p.add_argument(
+            "-A",
+            "--proxy-auth",
+            type=str,
+            help="optional HTTP proxy username and password separated by a "
+            "colon."
+        )
+        p.add_argument(
+            "-M",
+            "--prefer-http",
+            action="store_true",
+            help="if the bincall server supports both WebSocket and HTTP "
+            "connection modes for calls, prefer HTTP."
         )
 
     parser_client.add_argument(

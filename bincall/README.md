@@ -1,4 +1,4 @@
-# bincall Specification
+# bincall 1.0 Specification
 
 **bincall** (lowercase) is a basic binary call service. It allows users to call
 other users and transfer bytes in realtime. What those bytes mean is not
@@ -23,15 +23,24 @@ https://example.com/panda/bincall/
 
 5. The server may provide additional methods, accept extra URL parameters, and
 include more fields than specified in returned JSON objects to support extended
-or custom functionality. However, it must ensure that clients relying solely on
-the base API do not experience any loss of functionality, whether partial or
+or custom functionality, as long as their names begin with an underscore (e.g.
+"_custom-method"). However, it must ensure that clients relying solely on the
+base API do not experience any loss of functionality, whether partial or
 complete.
 
 6. The server must relay raw byte data between parties in a call accurately and
 without corruption. Byte order and values must never be altered, intentionally
-or otherwise. If a party experiences irreversible data loss or corruption at any
-point (whether incoming or outgoing), both the server and the client must
+or otherwise. If either the server or the client experiences irreversible data
+loss or corruption at any point (whether incoming or outgoing), it must
 terminate the connection immediately.
+
+7. The server must store user data (ID, password hash, etc.) in a private and
+secure place. It must only store salted hashes of user passwords and not their
+raw values.
+
+8. All HTTP(S) responses use status code 200.
+
+9. All HTTP(S) requests use the GET method unless specified otherwise.
 
 # API
 
@@ -77,6 +86,9 @@ result as a string ("ok" if successful, otherwise, the fail reason).
 
 - If authentication fails, the JSON object will not have a `deleteResult` field.
 
+- When an account is deleted, all calls in which that user participates must be
+terminated immediately.
+
 ### URL parameters
 
 - **auth:** same as in "authenticate"
@@ -92,6 +104,9 @@ https://example.com/bincall/delete-acc?auth=BHRlc3QKdmVyeXNlY3VyZQ==
 This method returns a random byte array. The number of bytes is suggested but
 not required to be randomly generated in the range [10, 1000].
 
+- The response headers must set `Content-Type` to `application/octet-stream` and
+`Content-Length` to the number of bytes included in the body.
+
 ### Example
 
 ```
@@ -100,8 +115,8 @@ https://example.com/bincall/dummy
 
 ## whos-calling
 
-This method returns the list of recent (not older than 60 seconds) incoming
-calls for a user after authentication.
+This method returns the list of recent (not older than 60 seconds), unanswered
+incoming calls for a user after authentication.
 
 - Returns a JSON object where `authResult` stores the authentication result as
 a string ("ok" if successful) and `calls` stores an array of `IncomingCall`
@@ -142,24 +157,32 @@ the connection.
 - If the peer doesn't answer the call in 60 seconds, it will send text frame
 "call-failed" and close the connection.
 
-- If the user and the peer are already in a different call, it will send text
-frame "already-in-call" and close the connection.
+- If the authenticated user already has an active call with the specified peer,
+the server will send text frame "already-in-call-with-peer" and close the
+connection.
 
 - If the peer does answer the call, it will generate a random string as the call
-key, send text frame "call-start-" followed by the key (e.g.
-"call-start-pretty-flamingo-425"), and start relaying data between the two users
-using ARC4 encryption which is insecure and only used for obfuscating the data.
-For relaying data, the server will keep receiving binary frames from the
-WebSocket client, decrypt them with ARC4 using the call key, and forward them to
-the peer using any method applicable (global variables, sockets, databases,
-files, distributed networks, etc.). At the same time, the server will also keep
-receiving binary packets from the peer, encrypt them with ARC4 using the call
-key, and send them to the WebSocket client. The process will continue until
-either side (the WebSocket client or the peer) closes the connection. If the
-peer closes the connection first, the server must forcefully terminate the
-WebSocket client's connection with no closing handshake. If the WebSocket client
-closes the connection first, the server must inform the peer that the call has
-ended using any method applicable.
+key, send text frame "call-start#ID#KEY" where ID is replaced with a unique
+integral identifier for the call and KEY is replaced with the call key (e.g.
+"call-start#2384230072#pretty-flamingo-425"), and start relaying data between
+the two users using ARC4 encryption which is insecure and only used for
+obfuscating the data. For relaying data, the server will keep receiving binary
+frames (packets) from the client, decrypt them with ARC4 using the call key, and
+forward them to the peer using any method applicable (global variables, sockets,
+databases, files, distributed networks, etc.). At the same time, the server will
+also keep receiving binary packets from the peer, encrypt them with ARC4 using
+the call key, and send their data to the client. The process will continue until
+either side (the client or the peer) closes the connection.
+
+- The server is allowed to concatenate several packets, potentially changing the
+original starting and ending indices, before relaying them, so users must not
+expect packet boundaries to be preserved.
+
+- If the peer closes the connection first, the server must forcefully terminate
+the WebSocket client's connection with no closing handshake. If the WebSocket
+client closes the connection first, the server must inform the peer that the
+call has ended using any method applicable (global variables, sockets,
+databases, files, distributed networks, etc.).
 
 Example implementations of the ARC4 encryption algorithm are provided later in
 the document.
@@ -189,24 +212,32 @@ the connection.
 - If there is no incoming call from the peer, it will send text frame "no-call"
 and close the connection.
 
-- If the user and the peer are already in a different call, it will send text
-frame "already-in-call" and close the connection.
+- If the authenticated user already has an active call with the specified peer,
+the server will send text frame "already-in-call-with-peer" and close the
+connection.
 
-- If nothing fails, it will generate a random string as the call key, send text
-frame "call-start-" followed by the key (e.g. "call-start-angry-chicken-912"),
-and start relaying data between the two users
-using ARC4 encryption which is insecure and only used for obfuscating the data.
-For relaying data, the server will keep receiving binary frames from the
-WebSocket client, decrypt them with ARC4 using the call key, and forward them to
-the peer using any method applicable (global variables, sockets, databases,
-files, distributed networks, etc.). At the same time, the server will also keep
-receiving binary packets from the peer, encrypt them with ARC4 using the call
-key, and send them to the WebSocket client. The process will continue until
-either side (the WebSocket client or the peer) closes the connection. If the
-peer closes the connection first, the server must forcefully terminate the
-WebSocket client's connection with no closing handshake. If the WebSocket client
-closes the connection first, the server must inform the peer that the call has
-ended using any method applicable.
+- If nothing fails, it will generate a random string as the call
+key, send text frame "call-start#ID#KEY" where ID is replaced with a unique
+integral identifier for the call and KEY is replaced with the call key (e.g.
+"call-start#2384230072#angry-chicken-912"), and start relaying data between the
+two users using ARC4 encryption which is insecure and only used for obfuscating
+the data. For relaying data, the server will keep receiving binary frames
+(packets) from the client, decrypt them with ARC4 using the call key, and
+forward them to the peer using any method applicable (global variables, sockets,
+databases, files, distributed networks, etc.). At the same time, the server will
+also keep receiving binary packets from the peer, encrypt them with ARC4 using
+the call key, and send their data to the client. The process will continue until
+either side (the client or the peer) closes the connection.
+
+- The server is allowed to concatenate several packets, potentially changing the
+original starting and ending indices, before relaying them, so users must not
+expect packet boundaries to be preserved.
+
+- If the peer closes the connection first, the server must forcefully terminate
+the WebSocket client's connection with no closing handshake. If the WebSocket
+client closes the connection first, the server must inform the peer that the
+call has ended using any method applicable (global variables, sockets,
+databases, files, distributed networks, etc.).
 
 Example implementations of the ARC4 encryption algorithm are provided later in
 the document.
@@ -222,7 +253,172 @@ the document.
 wss://example.com/bincall/pickup?auth=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test
 ```
 
-# ARC4
+## call-http (HTTP(S) request)
+
+This method provides the same functionality as "call" but uses HTTP(S) requests
+instead of a single, persistent WebSocket connection. It returns a JSON object
+where `result` stores the value of the text frame we would send in "call" (e.g.
+"auth-failed" or "call-start#ID#KEY").
+
+- Since the peer might take a while to answer the call, the server is allowed to
+send any character except an opening curly bracket ({) or square bracket ([) to
+the client every few seconds to prevent firewalls or other authoritative systems
+from closing the connection before a response is ever sent. Clients must ignore
+these characters and only start parsing after they read an opening curly bracket
+({) or square bracket ([).
+
+- If the call starts successfully, the client must call method "http-chunk"
+regularly to send data to the peer and/or receive new data from it.
+
+- The interval at which the client calls "http-chunk" must not be above 30
+seconds.
+
+- If the client does not call "http-chunk" for over 30 seconds, the server must
+end the call.
+
+### URL parameters
+
+- **auth:** same as in "authenticate"
+- **peer:** user ID of the peer
+
+### Example
+
+```
+https://example.com/bincall/call-http?auth=BHRlc3QKdmVyeXNlY3VyZQ==&peer=carrot-man
+```
+
+## pickup-http (HTTP(S) request)
+
+This method provides the same functionality as "pickup" but uses HTTP(S)
+requests instead of a single, persistent WebSocket connection. It returns a
+JSON object where `result` stores the value of the text frame we would send in
+"pickup" (e.g. "auth-failed" or "call-start#ID#KEY").
+
+- If the call starts successfully, the client must call method "http-chunk"
+regularly to send data to the peer and/or receive new data from it.
+
+- The interval at which the client calls "http-chunk" must not be above 30
+seconds.
+
+- If the client does not call "http-chunk" for over 30 seconds, the server must
+end the call.
+
+### URL parameters
+
+- **auth:** same as in "authenticate"
+- **peer:** user ID of the peer
+
+### Example
+
+```
+https://example.com/bincall/pickup-http?auth=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test
+```
+
+## http-chunk (HTTP(S) request)
+
+This method is called regularly by a client after a successful call start using
+method "call-http" or "pickup-http". After authentication and finding the call
+based on URL parameter "call-id", it relays data from the client to the peer and
+vice versa.
+
+- The request uses the POST HTTP method.
+
+- The request and response headers must set `Content-Type` to
+`application/octet-stream` and `Content-Length` to the number of bytes included
+in the request or response body (may be 0).
+
+- If the request fails for any reason (authentication failure, invalid user ID,
+etc.), the server must set `bincall-status` to the fail reason in the response
+headers (e.g. `bincall-status: call ID must be a valid integer`). Otherwise,
+it must set it to `ok` unless another value is specified based on the rules
+below.
+
+- If the request body is not empty, the server must decrypt it with ARC4 using
+the call key and forward it to the peer using any method applicable.
+
+- If there is new data sent by the peer, the server must encrypt it with ARC4
+using the call key and include it in the response body.
+
+- The client can ask the server to end the call by setting `bincall-status` to
+`end` in the request headers. The server must then inform the peer that the call
+has ended using any method applicable.
+
+- If the call has ended, the server must set `bincall-status` to `end` in the
+response headers.
+
+### URL parameters
+
+- **auth:** same as in "authenticate"
+- **peer:** user ID of the peer
+- **call-id:** call ID included in the "call-start" message
+
+### Example
+
+```
+https://example.com/bincall/http-chunk?auth=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test&call-id=2384230072
+```
+
+## connection-modes
+
+This method returns a JSON object where `connectionModes` stores the list of
+support connections modes by the server. If WebSocket is supported (methods
+"call" and "pickup"), it must include `websocket`. If HTTP requests is supported
+(methods "call-http", "pickup-http", and "http-chunk") for calls, it must
+include `http`. At least one mode must be supported (the list cannot be empty).
+Here's an example:
+
+```json
+{
+    connectionModes: ["websocket", "http"]
+}
+```
+
+The server may support additional connection modes and list them here, as long
+as the following requirements are met:
+
+1. At least one of `websocket` or `http` must be included.
+2. Any custom or extended modes must begin with an underscore (e.g., `_udp`) to
+prevent conflict with future modes in the official API.
+
+### Example
+
+```
+https://example.com/bincall/connection-modes
+```
+
+# User ID and Password Validation
+
+When creating a new user, the server must validate user IDs as the following:
+
+1. A user ID must be a non-empty string with 1 to 64 characters.
+2. It may only contain characters from the Latin alphabet (a-Z), Latin digits
+(0-9), an underscore (\_), and a dash (-).
+3. The first and last characters cannot be an underscore or dash.
+
+When creating a new user, the server must validate passwords as the following:
+
+1. A password must be a non-empty string with 10 to 64 unicode characters.
+2. It must not contain more than 3 adjacent identical characters. For example,
+"dolphin1112" is allowed but "dolphin1111" is not.
+
+The server may implement more, stricter criteria for user ID and password
+validation.
+
+# Connection Modes
+
+At least one of these sets of methods must be implemented:
+
+1. "call" and "pickup" which use a single, persistent WebSocket connection for
+calls.
+2. "call-http", "pickup-http", and "http-chunk" which use regular HTTP requests
+for calls.
+
+# Call Keys
+
+The server must use different calls keys for each user in a call to avoid direct
+relaying of data between them.
+
+# Appendix 1: ARC4 Implementation Example
 
 Here's an example implementation of the ARC4 encryption algorithm in Python.
 

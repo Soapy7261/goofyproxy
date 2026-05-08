@@ -106,7 +106,7 @@ export class UserService {
         user.incomingCalls.push({
             caller,
             timestamp,
-            answered: false,
+            answered: false
         });
 
         await this.updateUser(user);
