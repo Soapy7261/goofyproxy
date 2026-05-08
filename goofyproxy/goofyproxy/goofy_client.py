@@ -411,7 +411,7 @@ class GoofyClient:
     ) -> None:
         global keyboard_interrupt
 
-        self._log = make_logger(f"goofy client", log_level)
+        self._log = make_logger(f"GoofyClient", log_level)
 
         self._io = io
         self._host = host

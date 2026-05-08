@@ -251,7 +251,7 @@ class GoofyServer:
     ) -> None:
         global keyboard_interrupt
 
-        self._log = make_logger(f"goofy server", log_level)
+        self._log = make_logger(f"GoofyServer", log_level)
 
         self._io = io
         self._send_interval = float(send_interval)
