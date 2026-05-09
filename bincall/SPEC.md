@@ -344,7 +344,7 @@ request or response body (may be 0).
 
 - The response body uses the following binary format:
 
-1. [1 byte] number of bytes in the UTF-8 representation of the status message
+1. [2 bytes] number of bytes in the UTF-8 representation of the status message
 2. [N bytes] UTF-8 representation of the status message
 3. [4 bytes] number of bytes in data relayed from the peer
 4. [N bytes] data relayed from the peer, encrypted with ARC4 using the call key
