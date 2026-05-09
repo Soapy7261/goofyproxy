@@ -286,22 +286,14 @@ async function handleRequest(
 
     // Handle dummy
     if (method === 'dummy') {
-        const numBytes = 10 + Math.floor(Math.random() * 991); // 10 to 1000
-        const randomBytes = Buffer.alloc(numBytes);
-
-        // Fill buffer with random bytes using Math.random()
-        for (let i = 0; i < numBytes; i++) {
-            randomBytes[i] = Math.floor(Math.random() * 255.999);
-        }
-
         res.writeHead(
             200,
             {
-                'Content-Type': 'application/octet-stream',
-                'Content-Length': numBytes
+                'Content-Type': 'text/plain'
             }
         );
-        res.end(randomBytes);
+        const length = 10 + Math.floor(Math.random() * 991);
+        res.end(generateRandomAnsiString(length));
         return;
     }
 
@@ -978,6 +970,20 @@ function generateCallKey(): string {
     const keyPart2 = 100 + Math.floor(Math.random() * 9900);
     return `${keyPart0}-${keyPart1}-${keyPart2}`;
 }
+
+function generateRandomAnsiString(length: number): string {
+    if (length <= 0) return '';
+
+    const MIN_ANSI_CODE = 32;
+    const MAX_ANSI_CODE = 126;
+    const RANGE = MAX_ANSI_CODE - MIN_ANSI_CODE + 1;
+
+    return Array.from({ length }, () => {
+        const randomCode = MIN_ANSI_CODE + Math.floor(Math.random() * RANGE);
+        return String.fromCharCode(randomCode);
+    }).join('');
+}
+
 
 function readRequestBodyAsBuffer(req: IncomingMessage): Promise<Buffer> {
     return new Promise((resolve, reject) => {

@@ -113,11 +113,12 @@ https://example.com/bincall?method=delete-acc&cred=BHRlc3QKdmVyeXNlY3VyZQ==
 
 ## dummy
 
-This method returns a random byte array. The number of bytes is suggested but
-not required to be randomly generated in the range [10, 1000].
+This method returns a random piece of plain text or HTML. The number of
+characters is suggested but not required to be randomly generated in the range
+[10, 1000].
 
-- The response headers must set `Content-Type` to `application/octet-stream` and
-`Content-Length` to the number of bytes included in the body.
+- The response headers must set `Content-Type` to `text/plain` or `text/html`
+depending on the content returned.
 
 ### Example
 
