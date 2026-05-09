@@ -18,6 +18,10 @@ def run(args: argparse.Namespace):
         print(ADDRESS_FILTER_HELP)
         return
 
+    max_out_packet_size = goofycommon.parse_data_size(
+        args.max_out_packet_size
+    )
+
     headers: list | dict | None = None
     if args.headers:
         try:
@@ -50,9 +54,9 @@ def run(args: argparse.Namespace):
                 f"{goofycommon.format_exception(e)}"
             )
 
-    connection_mode_preference = ConnectionModePreference.PreferWebSocket
-    if args.prefer_http:
-        connection_mode_preference = ConnectionModePreference.PreferHttp
+    connection_mode_preference = ConnectionModePreference(
+        args.prefer_conn_mode
+    )
 
     if args.command == "delete-acc":
         delete_account(
@@ -90,9 +94,7 @@ def run(args: argparse.Namespace):
                 call_mode=CalleeMode(peers, args.peers_block),
                 interval_min=args.interval_min,
                 interval_max=args.interval_max,
-                max_out_packet_size=goofycommon.parse_data_size(
-                    args.max_out_packet_size
-                ),
+                max_out_packet_size=max_out_packet_size,
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
                 n_retries=args.retries,
@@ -136,9 +138,7 @@ def run(args: argparse.Namespace):
                 call_mode=CallerMode(args.peer),
                 interval_min=args.interval_min,
                 interval_max=args.interval_max,
-                max_out_packet_size=goofycommon.parse_data_size(
-                    args.max_out_packet_size
-                ),
+                max_out_packet_size=max_out_packet_size,
                 warm_up=not args.no_warmup,
                 ssl_verify=not args.no_ssl_verify,
                 n_retries=args.retries,
@@ -415,12 +415,16 @@ def main():
             help="optional HTTP proxy username and password separated by a "
             "colon."
         )
+        default = 0
         p.add_argument(
-            "-M",
-            "--prefer-http",
-            action="store_true",
-            help="if the bincall server supports both WebSocket and HTTP "
-            "connection modes for calls, prefer HTTP."
+            "-m",
+            "--prefer-conn-mode",
+            type=int,
+            default=default,
+            choices=[0, 1, 2],
+            help=f"[{default=}] which connection mode to prefer for calls (0: "
+            "websocket, 1: http, 2: http-b85). the final mode depends on the "
+            "server's supported modes."
         )
 
     parser_client.add_argument(

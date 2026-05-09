@@ -155,11 +155,13 @@ class CalleeMode(NamedTuple):
 class ConnectionMode(IntEnum):
     WebSocket = 0
     Http = 1
+    HttpB85 = 2
 
 
 class ConnectionModePreference(IntEnum):
     PreferWebSocket = 0
     PreferHttp = 1
+    PreferHttpB85 = 2
 
 
 class BincallIo(GoofyIo):
@@ -407,20 +409,37 @@ class BincallIo(GoofyIo):
         server_connection_modes: list[str] = res["connectionModes"]
         supports_websocket = "websocket" in server_connection_modes
         supports_http = "http" in server_connection_modes
-        if supports_websocket and supports_http:
-            if self.connection_mode_preference == \
-                    ConnectionModePreference.PreferWebSocket:
-                self._connection_mode = ConnectionMode.WebSocket
-            else:
-                self._connection_mode = ConnectionMode.Http
-        elif supports_websocket:
-            self._connection_mode = ConnectionMode.WebSocket
-        elif supports_http:
-            self._connection_mode = ConnectionMode.Http
-        else:
+        supports_http_b85 = "http-b85" in server_connection_modes
+        if not (supports_websocket or supports_http or supports_http_b85):
             raise BincallIoError(
-                "the server does not support WebSocket or HTTP connection modes"
+                "the server does not support any standard connection modes"
             )
+
+        # pick a connection mode
+        if self.connection_mode_preference == \
+                ConnectionModePreference.PreferWebSocket:
+            if supports_websocket:
+                self._connection_mode = ConnectionMode.WebSocket
+            elif supports_http:
+                self._connection_mode = ConnectionMode.Http
+            elif supports_http_b85:
+                self._connection_mode = ConnectionMode.HttpB85
+        elif self.connection_mode_preference == \
+                ConnectionModePreference.PreferHttp:
+            if supports_http:
+                self._connection_mode = ConnectionMode.Http
+            elif supports_http_b85:
+                self._connection_mode = ConnectionMode.HttpB85
+            elif supports_websocket:
+                self._connection_mode = ConnectionMode.WebSocket
+        elif self.connection_mode_preference == \
+                ConnectionModePreference.PreferHttpB85:
+            if supports_http_b85:
+                self._connection_mode = ConnectionMode.HttpB85
+            elif supports_http:
+                self._connection_mode = ConnectionMode.Http
+            elif supports_websocket:
+                self._connection_mode = ConnectionMode.WebSocket
 
         # continue in a separate thread
         self._thread = threading.Thread(
@@ -458,6 +477,24 @@ class BincallIo(GoofyIo):
                         },
                         {
                             "Content-Type": "application/octet-stream",
+                            "Content-Length": "0"
+                        },
+                        True
+                    )
+                )
+            elif self._connection_mode == ConnectionMode.HttpB85 \
+                    and self._call_id:
+                _do_in_thread_ignoring_exceptions(
+                    lambda _: self._request(
+                        "http-chunk-b85",
+                        {
+                            "cred": self._auth_code,
+                            "peer": self._peer_id,
+                            "call-id": self._call_id,
+                            "end": "1"
+                        },
+                        {
+                            "Content-Type": "text/plain",
                             "Content-Length": "0"
                         },
                         True
@@ -518,8 +555,9 @@ class BincallIo(GoofyIo):
                         f"calling peer {self._peer_id} (WebSocket)"
                     )
                     self._ws = WsClient(
-                        f"{self.url}call",
+                        self.url,
                         {
+                            "method": "call",
                             "cred": self._auth_code,
                             "peer": self._peer_id
                         },
@@ -530,7 +568,10 @@ class BincallIo(GoofyIo):
                     )
                     msg = self._ws.read()
                     self._handle_call_result(msg)
-                else:
+                elif (
+                    self._connection_mode == ConnectionMode.Http
+                    or self._connection_mode == ConnectionMode.HttpB85
+                ):
                     self._log.info(
                         f"calling peer {self._peer_id} (HTTP)"
                     )
@@ -553,6 +594,8 @@ class BincallIo(GoofyIo):
 
                     result: str = j["result"]
                     self._handle_call_result(result)
+                else:
+                    raise ValueError("unsupported connection mode for call")
             elif isinstance(self.call_mode, CalleeMode):
                 # wait for an incoming call
 
@@ -629,8 +672,9 @@ class BincallIo(GoofyIo):
                         f"(WebSocket)"
                     )
                     self._ws = WsClient(
-                        f"{self.url}pickup",
+                        self.url,
                         {
+                            "method": "pickup",
                             "cred": self._auth_code,
                             "peer": self._peer_id
                         },
@@ -641,7 +685,10 @@ class BincallIo(GoofyIo):
                     )
                     msg = self._ws.read()
                     self._handle_call_result(msg)
-                else:
+                elif (
+                    self._connection_mode == ConnectionMode.Http
+                    or self._connection_mode == ConnectionMode.HttpB85
+                ):
                     self._log.info(
                         f"answering incoming call from {self._peer_id} "
                         f"(HTTP)"
@@ -654,6 +701,8 @@ class BincallIo(GoofyIo):
                         }
                     )["result"]
                     self._handle_call_result(result)
+                else:
+                    raise ValueError("unsupported connection mode for pickup")
 
             # send and receive
             while not self._stopping:
@@ -680,7 +729,10 @@ class BincallIo(GoofyIo):
                             "received data is neither a str or bytes"
                         )
                     self._handle_in_data(data)
-                else:
+                elif (
+                    self._connection_mode == ConnectionMode.Http
+                    or self._connection_mode == ConnectionMode.HttpB85
+                ):
                     out_data = self._prepare_outgoing_packet()
 
                     params = {
@@ -691,16 +743,31 @@ class BincallIo(GoofyIo):
                     if self._stopping:
                         params["end"] = "1"
 
-                    res = self._request(
-                        "http-chunk",
-                        params,
-                        {
-                            "Content-Type": "application/octet-stream",
-                            "Content-Length": str(len(out_data))
-                        },
-                        True,
-                        out_data
-                    ).content
+                    b85_mode = self._connection_mode == ConnectionMode.HttpB85
+                    if b85_mode:
+                        out_data_encoded = base64.z85encode(out_data).decode()
+                        res = base64.z85decode(self._request(
+                            "http-chunk-b85",
+                            params,
+                            {
+                                "Content-Type": "text/plain",
+                                "Content-Length": str(len(out_data_encoded))
+                            },
+                            True,
+                            out_data_encoded
+                        ).content)
+                    else:
+                        res = self._request(
+                            "http-chunk",
+                            params,
+                            {
+                                "Content-Type": "application/octet-stream",
+                                "Content-Length": str(len(out_data))
+                            },
+                            True,
+                            out_data
+                        ).content
+
                     if not isinstance(res, bytes):
                         raise ValueError(
                             f"invalid http-chunk response type ({type(res)})"
@@ -727,6 +794,10 @@ class BincallIo(GoofyIo):
                         raise ConnectionError("call ended")
                     elif res_status != "ok":
                         raise ConnectionError(f"http-chunk: {res_status}")
+                else:
+                    raise ValueError(
+                        "unsupported connection mode for IO"
+                    )
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:

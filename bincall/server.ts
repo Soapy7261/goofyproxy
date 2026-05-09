@@ -10,8 +10,10 @@ import { validateUserId, validatePassword } from './utils/validation';
 import { UserService } from './services/userService';
 import { insecureEncrypt, insecureDecrypt } from './utils/crypto';
 import { Mutex, MutexInterface } from 'async-mutex';
+import { encodeBase85, decodeBase85 } from '@alttiri/base85';
 
 const userService = new UserService();
+const textDecoder = new TextDecoder();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 class Call {
@@ -286,13 +288,14 @@ async function handleRequest(
 
     // Handle dummy
     if (method === 'dummy') {
+        const length = 10 + Math.floor(Math.random() * 991);
         res.writeHead(
             200,
             {
-                'Content-Type': 'text/plain'
+                'Content-Type': 'text/plain',
+                'Content-Length': length
             }
         );
-        const length = 10 + Math.floor(Math.random() * 991);
         res.end(generateRandomAnsiString(length));
         return;
     }
@@ -341,12 +344,12 @@ async function handleRequest(
     if (method === 'connection-modes') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-            connectionModes: ['websocket', 'http']
+            connectionModes: ['websocket', 'http', 'http-b85']
         }));
         return;
     }
 
-    // Handle call-http
+    // Handle call-http and pickup-http
     const isCallRequest = method === 'call-http';
     const isPickupRequest = method === 'pickup-http';
     if (isCallRequest || isPickupRequest) {
@@ -424,20 +427,22 @@ async function handleRequest(
         return;
     }
 
-    // Handle http-chunk
-    if (method === 'http-chunk') {
+    // Handle http-chunk and http-chunk-b85
+    const isHttpChunkReq = method === 'http-chunk';
+    const isHttpChunkB85Req = method === 'http-chunk-b85';
+    if (isHttpChunkReq || isHttpChunkB85Req) {
         const authParam = url.searchParams.get('cred');
         const peerParam = url.searchParams.get('peer');
         const callIdParam = url.searchParams.get('call-id');
 
         if (authParam == null || peerParam == null || callIdParam == null) {
-            writeHttpChunkResponse(res, 'missing parameters');
+            writeHttpChunkResponse(res, isHttpChunkB85Req, 'missing parameters');
             return;
         }
 
         const { authResult, userId } = await authenticate(authParam)
         if (authResult !== "ok") {
-            writeHttpChunkResponse(res, `${authResult}`);
+            writeHttpChunkResponse(res, isHttpChunkB85Req, authResult);
             return;
         }
 
@@ -445,7 +450,7 @@ async function handleRequest(
         try {
             callId = parseInt(callIdParam);
         } catch (error) {
-            writeHttpChunkResponse(res, 'call-id must be a valid integer');
+            writeHttpChunkResponse(res, isHttpChunkB85Req, 'call-id must be a valid integer');
             return;
         }
 
@@ -453,11 +458,11 @@ async function handleRequest(
         const matchedCalls = currentCalls.filter(c => c.id === callId);
         release2();
         if (matchedCalls.length < 1) {
-            writeHttpChunkResponse(res, 'end');
+            writeHttpChunkResponse(res, isHttpChunkB85Req, 'end');
             return;
         }
         if (matchedCalls.length > 1) {
-            writeHttpChunkResponse(res, 'duplicated call ID');
+            writeHttpChunkResponse(res, isHttpChunkB85Req, 'duplicated call ID');
             return;
         }
         const call = matchedCalls[0];
@@ -481,12 +486,12 @@ async function handleRequest(
         } else if (userId === call.user0 && peerParam === call.user1) {
             call.user0LastActivity = Date.now();
         } else {
-            writeHttpChunkResponse(res, 'invalid user ID or peer ID');
+            writeHttpChunkResponse(res, isHttpChunkB85Req, 'invalid user ID or peer ID');
             return;
         }
 
         if (call.endedAfterEmptyPacket) {
-            writeHttpChunkResponse(res, 'end');
+            writeHttpChunkResponse(res, isHttpChunkB85Req, 'end');
             return;
         }
 
@@ -494,14 +499,22 @@ async function handleRequest(
 
         // relay from client to peer
         try {
-            if (req.headers['content-length'] != null
+            let reqBody: Buffer = Buffer.alloc(0);
+            if (isHttpChunkReq
+                && req.headers['content-length'] != null
                 && parseInt(req.headers['content-length']) > 0) {
-                const reqBody = await readRequestBodyAsBuffer(req);
-                if (reqBody.byteLength > 0) {
-                    const release = await myPakcetsMutex.acquire();
-                    myPackets.push(insecureDecrypt(reqBody, callKey));
-                    release();
-                }
+                reqBody = await readRequestBodyAsBuffer(req);
+            } else if (isHttpChunkB85Req) {
+                reqBody = Buffer.from(decodeBase85(
+                    textDecoder.decode(await readRequestBodyAsBuffer(req)),
+                    "z85"
+                ));
+            }
+
+            if (reqBody.byteLength > 0) {
+                const release = await myPakcetsMutex.acquire();
+                myPackets.push(insecureDecrypt(reqBody, callKey));
+                release();
             }
         } catch (error) {
             console.error(`Failed to write packet in http-chunk (${userId} -> ${theirId}):`, error);
@@ -559,6 +572,7 @@ async function handleRequest(
 
         writeHttpChunkResponse(
             res,
+            isHttpChunkB85Req,
             endIt ? 'end' : 'ok',
             peerData
         );
@@ -572,6 +586,7 @@ async function handleRequest(
 
 function writeHttpChunkResponse(
     res: ServerResponse,
+    base85Encoding: boolean,
     status: string,
     data: Buffer | null = null
 ) {
@@ -593,11 +608,21 @@ function writeHttpChunkResponse(
 
     const combined = Buffer.concat([part0, part1, part2, part3]);
 
-    res.writeHead(200, {
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': combined.byteLength
-    });
-    res.end(combined);
+    if (base85Encoding) {
+        const encoded = encodeBase85(combined, "z85");
+        res.writeHead(200, {
+            'Content-Type': 'text/plain',
+            'Content-Length': encoded.length
+        });
+        res.end(encoded);
+    }
+    else {
+        res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': combined.byteLength
+        });
+        res.end(combined);
+    }
 }
 
 async function makeCall(
@@ -983,7 +1008,6 @@ function generateRandomAnsiString(length: number): string {
         return String.fromCharCode(randomCode);
     }).join('');
 }
-
 
 function readRequestBodyAsBuffer(req: IncomingMessage): Promise<Buffer> {
     return new Promise((resolve, reject) => {

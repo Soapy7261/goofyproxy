@@ -9,6 +9,7 @@
         "dev": "ts-node-dev --respawn server.ts"
     },
     "dependencies": {
+        "@alttiri/base85": "^1.8.0",
         "@types/node": "^18.0.0",
         "@types/ws": "^8.5.0",
         "async-mutex": "^0.5.0",
