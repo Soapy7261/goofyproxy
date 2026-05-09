@@ -170,8 +170,8 @@ class BincallIo(GoofyIo):
     Args:
 
         url (str):
-            bincall server URL (HTTPS or HTTP) ending with a slash.
-            example: `https://example.com/bincall/`
+            bincall API URL (HTTPS or HTTP).
+            example: `https://example.com/bincall`
 
         id (str):
             user ID to send packets as. a new user will be created if the ID
@@ -390,8 +390,8 @@ class BincallIo(GoofyIo):
 
         self._auth_code = _generate_auth_code(self.id, self.password)
         res = self._request_json(
-            "authenticate",
-            {"auth": self._auth_code}
+            "auth",
+            {"cred": self._auth_code}
         )
 
         auth_result = res["authResult"]
@@ -451,7 +451,7 @@ class BincallIo(GoofyIo):
                     lambda _: self._request(
                         "http-chunk",
                         {
-                            "auth": self._auth_code,
+                            "cred": self._auth_code,
                             "peer": self._peer_id,
                             "call-id": self._call_id,
                             "end": "1"
@@ -520,7 +520,7 @@ class BincallIo(GoofyIo):
                     self._ws = WsClient(
                         f"{self.url}call",
                         {
-                            "auth": self._auth_code,
+                            "cred": self._auth_code,
                             "peer": self._peer_id
                         },
                         headers=self.headers,
@@ -538,7 +538,7 @@ class BincallIo(GoofyIo):
                     res = self._request(
                         "call-http",
                         {
-                            "auth": self._auth_code,
+                            "cred": self._auth_code,
                             "peer": self._peer_id
                         }
                     ).text
@@ -590,7 +590,7 @@ class BincallIo(GoofyIo):
 
                     res = self._request_json(
                         "whos-calling",
-                        {"auth": self._auth_code}
+                        {"cred": self._auth_code}
                     )
                     auth_result = res["authResult"]
                     if auth_result != "ok":
@@ -631,7 +631,7 @@ class BincallIo(GoofyIo):
                     self._ws = WsClient(
                         f"{self.url}pickup",
                         {
-                            "auth": self._auth_code,
+                            "cred": self._auth_code,
                             "peer": self._peer_id
                         },
                         headers=self.headers,
@@ -649,7 +649,7 @@ class BincallIo(GoofyIo):
                     result: str = self._request_json(
                         "pickup-http",
                         {
-                            "auth": self._auth_code,
+                            "cred": self._auth_code,
                             "peer": self._peer_id
                         }
                     )["result"]
@@ -684,7 +684,7 @@ class BincallIo(GoofyIo):
                     out_data = self._prepare_outgoing_packet()
 
                     params = {
-                        "auth": self._auth_code,
+                        "cred": self._auth_code,
                         "peer": self._peer_id,
                         "call-id": self._call_id
                     }
@@ -724,7 +724,7 @@ class BincallIo(GoofyIo):
 
                     self._handle_in_data(data)
                     if res_status == "end":
-                        raise ConnectionError("call ended by the server")
+                        raise ConnectionError("call ended")
                     elif res_status != "ok":
                         raise ConnectionError(f"http-chunk: {res_status}")
         except KeyboardInterrupt as e:
@@ -835,10 +835,13 @@ class BincallIo(GoofyIo):
             self._in_buf += packet
         self._in_buf_lock.release()
 
-    def _dummy_request(self, path: str):
+    def _dummy_request(self):
         try:
             requests.get(
-                f"{self.url}{path}",
+                f"{self.url}",
+                params={
+                    "method": "dummy"
+                },
                 headers=self.headers,
                 timeout=20.,
                 allow_redirects=True,
@@ -853,7 +856,7 @@ class BincallIo(GoofyIo):
 
     def _request(
         self,
-        path: str,
+        method: str,
         params: dict | None = None,
         extra_headers: dict | None = None,
         post: bool = False,
@@ -863,6 +866,12 @@ class BincallIo(GoofyIo):
         if extra_headers is not None:
             headers.update(extra_headers)
 
+        resolved_params = {
+            "method": method
+        }
+        if params is not None:
+            resolved_params.update(params)
+
         for i in range(self.n_retries + 1):
             try:
                 if i > 0:
@@ -870,9 +879,9 @@ class BincallIo(GoofyIo):
 
                 if post:
                     res = requests.post(
-                        f"{self.url}{path}",
+                        f"{self.url}",
                         data=data,
-                        params=params,
+                        params=resolved_params,
                         headers=headers,
                         timeout=20.,
                         allow_redirects=True,
@@ -884,8 +893,8 @@ class BincallIo(GoofyIo):
                     )
                 else:
                     res = requests.get(
-                        f"{self.url}{path}",
-                        params=params,
+                        f"{self.url}",
+                        params=resolved_params,
                         data=data,
                         headers=headers,
                         timeout=20.,
@@ -909,13 +918,13 @@ class BincallIo(GoofyIo):
                 return res
             except Exception as e:
                 self._log.error(
-                    f"\"/{path}\" failed ({i}/{self.n_retries}): "
+                    f"\"/{method}\" failed ({i}/{self.n_retries}): "
                     f"{format_exception(e)}"
                 )
-        raise ConnectionError(f"too many failures in \"{path}\"")
+        raise ConnectionError(f"too many failures in \"{method}\"")
 
-    def _request_json(self, path: str, params: dict | None = None) -> dict:
-        j = self._request(path, params).json()
+    def _request_json(self, method: str, params: dict | None = None) -> dict:
+        j = self._request(method, params).json()
         if not isinstance(j, dict):
             raise ValueError("response JSON is not a dict")
         return j
@@ -980,7 +989,7 @@ def delete_account(
     auth_code = _generate_auth_code(id, password)
     res = requests.get(
         f"{url}delete-acc",
-        {"auth": auth_code},
+        {"cred": auth_code},
         headers=headers,
         timeout=20.,
         allow_redirects=True,
@@ -1008,9 +1017,6 @@ ID_VALID_CHARS = \
 
 
 def _validate_server_url(url: str) -> str:
-    if not url.endswith("/"):
-        raise ValueError("server URL must end with \"/\"")
-
     prefix = "https://"
     if url.lower().startswith(prefix):
         return prefix + url[len(prefix):]

@@ -159,11 +159,16 @@ async function handleRequest(
     res: ServerResponse
 ) {
     const url = new URL(req.url || '', `https://${req.headers.host}`);
-    const pathname = url.pathname;
 
-    // Handle /authenticate
-    if (pathname === `${CONFIG.BINCALL_API_PATH}/authenticate`) {
-        const authParam = url.searchParams.get('auth');
+    let method = url.searchParams.get('method') || "";
+    if (url.pathname !== CONFIG.BINCALL_API_PATH
+        && url.pathname !== CONFIG.BINCALL_API_PATH + '/') {
+        method = "";
+    }
+
+    // Handle auth
+    if (method === 'auth') {
+        const authParam = url.searchParams.get('cred');
 
         if (authParam == null) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -228,9 +233,9 @@ async function handleRequest(
         return;
     }
 
-    // Handle /delete-acc
-    if (pathname === `${CONFIG.BINCALL_API_PATH}/delete-acc`) {
-        const authParam = url.searchParams.get('auth');
+    // Handle delete-acc
+    if (method === 'delete-acc') {
+        const authParam = url.searchParams.get('cred');
         if (authParam == null) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ authResult: 'no auth param' }));
@@ -279,8 +284,8 @@ async function handleRequest(
         return;
     }
 
-    // Handle /dummy
-    if (pathname === `${CONFIG.BINCALL_API_PATH}/dummy`) {
+    // Handle dummy
+    if (method === 'dummy') {
         const numBytes = 10 + Math.floor(Math.random() * 991); // 10 to 1000
         const randomBytes = Buffer.alloc(numBytes);
 
@@ -300,9 +305,9 @@ async function handleRequest(
         return;
     }
 
-    // Handle /whos-calling
-    if (pathname === `${CONFIG.BINCALL_API_PATH}/whos-calling`) {
-        const authParam = url.searchParams.get('auth');
+    // Handle whos-calling
+    if (method === 'whos-calling') {
+        const authParam = url.searchParams.get('cred');
         if (authParam == null) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ authResult: 'no auth param' }));
@@ -340,8 +345,8 @@ async function handleRequest(
         return;
     }
 
-    // Handle /connection-modes
-    if (pathname === `${CONFIG.BINCALL_API_PATH}/connection-modes`) {
+    // Handle connection-modes
+    if (method === 'connection-modes') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             connectionModes: ['websocket', 'http']
@@ -349,13 +354,13 @@ async function handleRequest(
         return;
     }
 
-    // Handle /call-http
-    const isCallRequest = pathname === `${CONFIG.BINCALL_API_PATH}/call-http`;
-    const isPickupRequest = pathname === `${CONFIG.BINCALL_API_PATH}/pickup-http`;
+    // Handle call-http
+    const isCallRequest = method === 'call-http';
+    const isPickupRequest = method === 'pickup-http';
     if (isCallRequest || isPickupRequest) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
 
-        const authParam = url.searchParams.get('auth');
+        const authParam = url.searchParams.get('cred');
         const peerParam = url.searchParams.get('peer');
 
         let result: Array<string | Call> | null = null;
@@ -427,9 +432,9 @@ async function handleRequest(
         return;
     }
 
-    // Handle /http-chunk
-    if (pathname === `${CONFIG.BINCALL_API_PATH}/http-chunk`) {
-        const authParam = url.searchParams.get('auth');
+    // Handle http-chunk
+    if (method === 'http-chunk') {
+        const authParam = url.searchParams.get('cred');
         const peerParam = url.searchParams.get('peer');
         const callIdParam = url.searchParams.get('call-id');
 
@@ -1048,12 +1053,17 @@ activeServers.forEach(server => {
             });
 
             const url = new URL(req.url || '', `https://${req.headers.host}`);
-            const pathname = url.pathname;
+
+            let method = url.searchParams.get('method') || "";
+            if (url.pathname !== CONFIG.BINCALL_API_PATH
+                && url.pathname !== CONFIG.BINCALL_API_PATH + '/') {
+                method = "";
+            }
 
             // Handle WebSocket connections
-            if (pathname === `${CONFIG.BINCALL_API_PATH}/call`) {
+            if (method === 'call') {
                 const result = await makeCall(
-                    url.searchParams.get('auth'),
+                    url.searchParams.get('cred'),
                     url.searchParams.get('peer')
                 );
                 if (result.length < 1) {
@@ -1075,9 +1085,9 @@ activeServers.forEach(server => {
                     result[2] as string,
                     result[3] as string
                 );
-            } else if (pathname === `${CONFIG.BINCALL_API_PATH}/pickup`) {
+            } else if (method === 'pickup') {
                 const result = await pickup(
-                    url.searchParams.get('auth'),
+                    url.searchParams.get('cred'),
                     url.searchParams.get('peer')
                 );
                 if (result.length < 1) {
@@ -1101,7 +1111,7 @@ activeServers.forEach(server => {
                 );
             } else {
                 // Unknown WebSocket path
-                ws.close(1008, 'Unknown path');
+                ws.close(1008, 'unknown-method');
             }
         } catch (e) {
             console.error("Failed to handle WebSocket connection:", e)

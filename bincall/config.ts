@@ -9,7 +9,7 @@ export const CONFIG = {
     SSL_KEY_PATH: './.certs/server.key',
     SSL_CERT_PATH: './.certs/server.crt',
 
-    // bincall API path
+    // bincall API path with no ending slash
     BINCALL_API_PATH: '/bincall',
 
     // HTTPS server port. use null to disable the HTTPS server.

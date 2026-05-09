@@ -12,39 +12,51 @@ client.
 3. Two unique users can only be in a single call with each other at a time. The
 server must guarantee to prevent this from happening.
 
-4. The server may serve static HTML pages, web apps, or anything else for URL
-paths outside the bincall API. However, if the request path matches one of the
-bincall API methods, it must handle it as specified in this document. The root
-path of the bincall API is up to you, for example:
+4. The server may serve static HTML pages, web apps, or anything else except for
+the bincall API URL path which must handled as specified in this document. The
+bincall API path is up to the server maintainer, for example:
 
 ```
-https://example.com/panda/bincall/
+https://example.com/panda/bincall
 ```
 
-5. The server may provide additional methods, accept extra URL parameters, and
+5. bincall uses unusual ways of designing an API. It avoids using custom URL
+paths for methods (e.g. `https://example.com/bincall/method-name`), custom HTTP
+headers, and some other features. These design choices have been made to make it
+possible to implement bincall servers in strict environments that barely provide
+enough functionality to make something resembling a server.
+
+6. The server may provide additional methods, accept extra URL parameters, and
 include more fields than specified in returned JSON objects to support extended
 or custom functionality, as long as their names begin with an underscore (e.g.
 "_custom-method"). However, it must ensure that clients relying solely on the
 base API do not experience any loss of functionality, whether partial or
 complete.
 
-6. The server must relay raw byte data between parties in a call accurately and
+7. The server must relay raw byte data between parties in a call accurately and
 without corruption. Byte order and values must never be altered, intentionally
 or otherwise. If either the server or the client experiences irreversible data
 loss or corruption at any point (whether incoming or outgoing), it must
 terminate the connection immediately.
 
-7. The server must store user data (ID, password hash, etc.) in a private and
+8. The server must store user data (ID, password hash, etc.) in a private and
 secure place. It must only store salted hashes of user passwords and not their
 raw values.
 
-8. All HTTP(S) responses use status code 200.
+9. All HTTP(S) responses use status code 200.
 
-9. All HTTP(S) requests use the GET method unless specified otherwise.
+10. All HTTP(S) requests use the GET method unless specified otherwise.
+
+11. Every request must have a `method` field in its URL parameters specifying
+which bincall method to call. Example:
+
+```
+https://example.com/bincall?method=dummy
+```
 
 # API
 
-## authenticate
+## auth
 
 This method takes authentication parameters (user ID and password) and checks
 if they are correct.
@@ -56,14 +68,14 @@ stores the fail reason.
 
 - If no existing user matches the ID, the server can either try to create a new
 one or provide a different method (e.g. "create-user") for creating users. If it
-successfully creates a user within this method ("authenticate"), it must return
+successfully creates a user within this method ("auth"), it must return
 `{ authResult: 'ok-created' }`. If it fails to do so or provides a separate
 method for user creation, it must return a JSON object where `authResult` stores
 the fail reason.
 
 ### URL parameters
 
-- **auth:** a base64-encoded representation of a byte array in the following
+- **cred:** a base64-encoded representation of a byte array in the following
 format:
 1. [1 byte] number of bytes in the UTF-8 representation of the user ID
 2. [N bytes] UTF-8 representation of the user ID
@@ -73,7 +85,7 @@ format:
 ### Example
 
 ```
-https://example.com/bincall/authenticate?auth=BHRlc3QKdmVyeXNlY3VyZQ==
+https://example.com/bincall?method=auth&cred=BHRlc3QKdmVyeXNlY3VyZQ==
 ```
 
 ## delete-acc
@@ -91,12 +103,12 @@ terminated immediately.
 
 ### URL parameters
 
-- **auth:** same as in "authenticate"
+- **cred:** same as in "auth"
 
 ### Example
 
 ```
-https://example.com/bincall/delete-acc?auth=BHRlc3QKdmVyeXNlY3VyZQ==
+https://example.com/bincall?method=delete-acc&cred=BHRlc3QKdmVyeXNlY3VyZQ==
 ```
 
 ## dummy
@@ -110,7 +122,7 @@ not required to be randomly generated in the range [10, 1000].
 ### Example
 
 ```
-https://example.com/bincall/dummy
+https://example.com/bincall?method=dummy
 ```
 
 ## whos-calling
@@ -134,12 +146,12 @@ interface IncomingCall {
 
 ### URL parameters
 
-- **auth:** same as in "authenticate"
+- **cred:** same as in "auth"
 
 ### Example
 
 ```
-https://example.com/bincall/whos-calling?auth=BHRlc3QKdmVyeXNlY3VyZQ==
+https://example.com/bincall?method=whos-calling&cred=BHRlc3QKdmVyeXNlY3VyZQ==
 ```
 
 ## call (WebSocket request)
@@ -189,13 +201,13 @@ the document.
 
 ### URL parameters
 
-- **auth:** same as in "authenticate"
+- **cred:** same as in "auth"
 - **peer:** user ID of the peer
 
 ### Example
 
 ```
-wss://example.com/bincall/call?auth=BHRlc3QKdmVyeXNlY3VyZQ==&peer=carrot-man
+wss://example.com/bincall?method=call&cred=BHRlc3QKdmVyeXNlY3VyZQ==&peer=carrot-man
 ```
 
 ## pickup (WebSocket request)
@@ -244,13 +256,13 @@ the document.
 
 ### URL parameters
 
-- **auth:** same as in "authenticate"
+- **cred:** same as in "auth"
 - **peer:** user ID of the peer
 
 ### Example
 
 ```
-wss://example.com/bincall/pickup?auth=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test
+wss://example.com/bincall?method=pickup&cred=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test
 ```
 
 ## call-http (HTTP(S) request)
@@ -278,13 +290,13 @@ end the call.
 
 ### URL parameters
 
-- **auth:** same as in "authenticate"
+- **cred:** same as in "auth"
 - **peer:** user ID of the peer
 
 ### Example
 
 ```
-https://example.com/bincall/call-http?auth=BHRlc3QKdmVyeXNlY3VyZQ==&peer=carrot-man
+https://example.com/bincall?method=call-http&cred=BHRlc3QKdmVyeXNlY3VyZQ==&peer=carrot-man
 ```
 
 ## pickup-http (HTTP(S) request)
@@ -305,13 +317,13 @@ end the call.
 
 ### URL parameters
 
-- **auth:** same as in "authenticate"
+- **cred:** same as in "auth"
 - **peer:** user ID of the peer
 
 ### Example
 
 ```
-https://example.com/bincall/pickup-http?auth=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test
+https://example.com/bincall?method=pickup-http&cred=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test
 ```
 
 ## http-chunk (HTTP(S) request)
@@ -353,14 +365,14 @@ use status message `end`.
 
 ### URL parameters
 
-- **auth:** same as in "authenticate"
+- **cred:** same as in "auth"
 - **peer:** user ID of the peer
 - **call-id:** call ID included in the "call-start" message
 
 ### Example
 
 ```
-https://example.com/bincall/http-chunk?auth=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test&call-id=2384230072
+https://example.com/bincall?method=http-chunk&cred=CmNhcnJvdC1tYW4KdmVyeWNhcnJvdA==&peer=test&call-id=2384230072
 ```
 
 ## connection-modes
@@ -388,7 +400,7 @@ prevent conflict with future modes in the official API.
 ### Example
 
 ```
-https://example.com/bincall/connection-modes
+https://example.com/bincall?method=connection-modes
 ```
 
 # User ID and Password Validation

@@ -258,8 +258,8 @@ def main():
         p.add_argument(
             "url",
             type=str,
-            help="bincall server URL (HTTPS or HTTP) ending with a slash. "
-            "example: \"https://example.com/bincall/\""
+            help="bincall API URL (HTTPS or HTTP). "
+            "example: \"https://example.com/bincall\""
         )
         p.add_argument(
             "id",
