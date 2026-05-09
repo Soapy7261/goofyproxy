@@ -970,8 +970,8 @@ function hashFNV1a(str1: string, str2: string, num: number): number {
 }
 
 function generateCallKey(): string {
-    const keyParts0: string[] = ['pretty', 'beautiful', 'cute', 'angry', 'aggressive', 'wild', 'sad', 'happy', 'weird', 'surprised', 'excited', 'baby', 'old', 'grateful', 'tired', 'exhausted', 'hungry'];
-    const keyParts1: string[] = ['panda', 'flamingo', 'duck', 'chicken', 'penguin', 'ostrich', 'bird', 'parrot', 'sheep', 'cow', 'goat', 'camel', 'fish', 'shark', 'whale', 'turtle', 'cat', 'dog', 'dolphin'];
+    const keyParts0: string[] = ['pretty', 'beautiful', 'cute', 'angry', 'aggressive', 'wild', 'sad', 'happy', 'weird', 'surprised', 'excited', 'baby', 'old', 'grateful', 'tired', 'exhausted', 'hungry', 'brave', 'silly', 'clever', 'calm'];
+    const keyParts1: string[] = ['panda', 'flamingo', 'duck', 'chicken', 'penguin', 'ostrich', 'bird', 'parrot', 'sheep', 'cow', 'goat', 'camel', 'fish', 'shark', 'whale', 'turtle', 'cat', 'dog', 'dolphin', 'tiger', 'eagle', 'dragon', 'phoenix'];
 
     const keyPart0 = getRandomElement(keyParts0);
     const keyPart1 = getRandomElement(keyParts1);

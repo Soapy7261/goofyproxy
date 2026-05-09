@@ -176,7 +176,7 @@ connection.
 - If the peer does answer the call, it will generate a random string as the call
 key, send text frame "call-start#ID#KEY" where ID is replaced with a unique
 integral identifier for the call and KEY is replaced with the call key (e.g.
-"call-start#2384230072#pretty-flamingo-425"), and start relaying data between
+"call-start#2384230072#pretty-flamingo-4255"), and start relaying data between
 the two users using ARC4 encryption which is insecure and only used for
 obfuscating the data. For relaying data, the server will keep receiving binary
 frames (packets) from the client, decrypt them with ARC4 using the call key, and
@@ -231,7 +231,7 @@ connection.
 - If nothing fails, it will generate a random string as the call
 key, send text frame "call-start#ID#KEY" where ID is replaced with a unique
 integral identifier for the call and KEY is replaced with the call key (e.g.
-"call-start#2384230072#angry-chicken-912"), and start relaying data between the
+"call-start#2384230072#angry-chicken-9120"), and start relaying data between the
 two users using ARC4 encryption which is insecure and only used for obfuscating
 the data. For relaying data, the server will keep receiving binary frames
 (packets) from the client, decrypt them with ARC4 using the call key, and

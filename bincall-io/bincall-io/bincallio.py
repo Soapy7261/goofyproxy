@@ -507,7 +507,7 @@ class BincallIo(GoofyIo):
                 n = random.randint(3, 5)
                 for _ in range(n):
                     time.sleep(.8 + 1.1 * random.random())
-                    self._dummy_request("dummy")
+                    self._dummy_request()
                 time.sleep(1. + .2 * random.random())
 
             if isinstance(self.call_mode, CallerMode):
