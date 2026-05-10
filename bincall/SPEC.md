@@ -392,6 +392,10 @@ Base‑85 (Z85).
 - The response body uses the same format as in "http-chunk" but encodes the data
 in ZeroMQ Base‑85 (Z85).
 
+- Padding is not required for Base-85-encoded pieces of data and neither the
+server nor the client may assume the other side's content length is a perfect
+multiple of 5.
+
 ### URL parameters
 
 - **cred:** same as in "auth"
@@ -415,7 +419,7 @@ support connections modes by the server.
 2. If HTTP requests with binary data are supported for calls (methods
 "call-http", "pickup-http", and "http-chunk"), it must include `http`.
 
-3. If HTTP requests with Base85-encoded data are supported for calls (methods
+3. If HTTP requests with Base-85-encoded data are supported for calls (methods
 "call-http", "pickup-http", and "http-chunk-b85"), it must include `http-b85`.
 
 At least one mode must be supported (the list cannot be empty). Here's an
@@ -469,8 +473,8 @@ for calls.
 
 # Call Keys
 
-The server must use different calls keys for each user in a call to avoid direct
-relaying of data between them.
+The server must use different calls keys for each user in a call (one key per
+user).
 
 # Appendix 1: ARC4 Implementation Example
 
