@@ -7,7 +7,7 @@ import time
 import threading
 import random
 from typing import NamedTuple
-from enum import IntEnum
+from enum import StrEnum
 from collections.abc import Callable
 import gzip
 import base64
@@ -152,16 +152,16 @@ class CalleeMode(NamedTuple):
     """
 
 
-class ConnectionMode(IntEnum):
-    WebSocket = 0
-    Http = 1
-    HttpB85 = 2
+class ConnectionMode(StrEnum):
+    WebSocket = "web-socket"
+    Http = "http"
+    HttpB85 = "http-b85"
 
 
-class ConnectionModePreference(IntEnum):
-    PreferWebSocket = 0
-    PreferHttp = 1
-    PreferHttpB85 = 2
+class ConnectionModePreference(StrEnum):
+    PreferWebSocket = "prefer-web-socket"
+    PreferHttp = "prefer-http"
+    PreferHttpB85 = "prefer-http-b85"
 
 
 class BincallIo(GoofyIo):
@@ -273,6 +273,8 @@ class BincallIo(GoofyIo):
     _call_id: str | None = None
     _call_key: str | None = None
 
+    _req_session: requests.Session
+
     def __init__(
         self,
         url: str,
@@ -282,7 +284,7 @@ class BincallIo(GoofyIo):
         interval_min: float = .05,
         interval_max: float = .25,
         max_out_packet_size: int = 128 * 1024,
-        warm_up: bool = True,
+        warm_up: bool = False,
         ssl_verify: bool = True,
         n_retries: int = 10,
         retry_interval: float = 3.,
@@ -357,15 +359,12 @@ class BincallIo(GoofyIo):
                 f"equal to interval_min={self.interval_min}."
             )
 
-        avg_interval = (self.interval_min + self.interval_max) * .5
-        out_data_rate = self.max_out_packet_size / avg_interval
         self._log.info(
             f"URL: {self.url}\n"
             f"user ID: {self.id}\n"
             f"interval range: {self.interval_min}-{self.interval_max} s\n"
             f"max. outgoing packet size: "
-            f"{format_data_size(self.max_out_packet_size)}\n"
-            f"outgoing data rate: ~{format_data_rate(out_data_rate)}"
+            f"{format_data_size(self.max_out_packet_size)}"
         )
 
         if self.url.startswith("https://") and not self.ssl_verify:
@@ -387,6 +386,8 @@ class BincallIo(GoofyIo):
         self._raw_in_buf = bytearray()
         self._in_buf = bytearray()
         self._in_buf_lock = threading.Lock()
+
+        self._req_session = requests.Session()
 
         # authentication
 
@@ -440,6 +441,7 @@ class BincallIo(GoofyIo):
                 self._connection_mode = ConnectionMode.Http
             elif supports_websocket:
                 self._connection_mode = ConnectionMode.WebSocket
+        self._log.info(f"using connection mode {self._connection_mode}")
 
         # continue in a separate thread
         self._thread = threading.Thread(
@@ -746,7 +748,7 @@ class BincallIo(GoofyIo):
                     b85_mode = self._connection_mode == ConnectionMode.HttpB85
                     if b85_mode:
                         out_data_encoded = base64.z85encode(out_data).decode()
-                        res = base64.z85decode(self._request(
+                        res = self._request(
                             "http-chunk-b85",
                             params,
                             {
@@ -755,7 +757,14 @@ class BincallIo(GoofyIo):
                             },
                             True,
                             out_data_encoded
-                        ).content)
+                        ).content
+                        try:
+                            res = base64.z85decode(res)
+                        except Exception as e:
+                            raise ValueError(
+                                f"failed to decode Z85: {format_exception(e)} ("
+                                f"original response: \"{res}\")."
+                            )
                     else:
                         res = self._request(
                             "http-chunk",
@@ -908,7 +917,7 @@ class BincallIo(GoofyIo):
 
     def _dummy_request(self):
         try:
-            requests.get(
+            self._req_session.get(
                 f"{self.url}",
                 params={
                     "method": "dummy"
@@ -949,7 +958,7 @@ class BincallIo(GoofyIo):
                     time.sleep(self.retry_interval)
 
                 if post:
-                    res = requests.post(
+                    res = self._req_session.post(
                         f"{self.url}",
                         data=data,
                         params=resolved_params,
@@ -963,7 +972,7 @@ class BincallIo(GoofyIo):
                         verify=self.ssl_verify
                     )
                 else:
-                    res = requests.get(
+                    res = self._req_session.get(
                         f"{self.url}",
                         params=resolved_params,
                         data=data,
@@ -989,7 +998,7 @@ class BincallIo(GoofyIo):
                 return res
             except Exception as e:
                 self._log.error(
-                    f"\"/{method}\" failed ({i}/{self.n_retries}): "
+                    f"\"{method}\" failed ({i}/{self.n_retries}): "
                     f"{format_exception(e)}"
                 )
         raise ConnectionError(f"too many failures in \"{method}\"")

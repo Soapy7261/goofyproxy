@@ -304,7 +304,7 @@ def main():
         action="store_true",
         help="wait for another call every time one ends"
     )
-    default = 2.
+    default = 3.
     parser_server.add_argument(
         "-w",
         "--endless-wait",
@@ -415,16 +415,19 @@ def main():
             help="optional HTTP proxy username and password separated by a "
             "colon."
         )
-        default = 0
+        default = ConnectionModePreference.PreferWebSocket
         p.add_argument(
             "-m",
             "--prefer-conn-mode",
-            type=int,
+            type=str,
             default=default,
-            choices=[0, 1, 2],
-            help=f"[{default=}] which connection mode to prefer for calls (0: "
-            "websocket, 1: http, 2: http-b85). the final mode depends on the "
-            "server's supported modes."
+            choices=[
+                ConnectionModePreference.PreferWebSocket,
+                ConnectionModePreference.PreferHttp,
+                ConnectionModePreference.PreferHttpB85
+            ],
+            help=f"[default={default}] which connection mode to prefer for "
+            "calls."
         )
 
     parser_client.add_argument(
