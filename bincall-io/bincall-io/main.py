@@ -108,7 +108,7 @@ def run(args: argparse.Namespace):
 
             GoofyServer(
                 gio,
-                send_interval=min(.05, gio.interval_min),
+                send_interval=.005,
                 address_filter=args.address_filter,
 
                 address_filter_type=AddressFilterType.Allow
@@ -155,8 +155,8 @@ def run(args: argparse.Namespace):
                 host="0.0.0.0",
                 port=args.port,
                 buf_size=args.bufsize,
-                poll_interval=min(.05, gio.interval_min),
-                send_interval=min(.05, gio.interval_min),
+                poll_interval=.005,
+                send_interval=.005,
                 address_filter=args.address_filter,
 
                 address_filter_type=AddressFilterType.Allow
