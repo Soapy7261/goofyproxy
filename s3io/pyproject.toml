@@ -1,0 +1,7 @@
+[project]
+name = "s3io"
+version = "0.1.0"
+dependencies = [
+    "boto3>=1.43.6",
+    "goofyproxy>=0.1.0",
+]

@@ -3,6 +3,7 @@
         "${workspaceFolder}",
         "./goofyproxy",
         "./videoio/videoio",
-        "./bincall-io/bincall-io"
+        "./bincall-io/bincall-io",
+        "./s3io/s3io",
     ]
 }
