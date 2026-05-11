@@ -238,7 +238,8 @@ class S3Io(GoofyIo):
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
-            self._log.fatal(format_exception(e))
+            if not self._stopping:
+                self._log.fatal(format_exception(e))
         finally:
             self.stop()
 
@@ -351,9 +352,11 @@ class S3Io(GoofyIo):
                 bytes_io.seek(0)
                 data = bytes_io.getvalue()
             except Exception as e:
-                self._log.warning(
-                    f"failed to download file \"{path}\": {format_exception(e)}"
-                )
+                if not self._stopping:
+                    self._log.warning(
+                        f"failed to download file \"{path}\": "
+                        f"{format_exception(e)}"
+                    )
                 continue
 
             # successful read, can be safely deleted now
