@@ -326,7 +326,7 @@ class GoofyClient:
         self._memory_limit_mib = float(value)
 
     _server_sock: socket.socket | None = None
-    _running: bool = False
+    _running: bool = True
 
     @property
     def running(self) -> bool:
@@ -446,7 +446,6 @@ class GoofyClient:
         self._server_sock.bind((self._host, self._port))
         self._server_sock.listen(self._backlog)
         self._server_sock.settimeout(2.)
-        self._running = True
 
         msg = f"local SOCKS5 proxy server running on {self._host}:{self._port}"
         if self._host == "0.0.0.0":

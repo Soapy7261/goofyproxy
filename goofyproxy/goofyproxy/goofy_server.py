@@ -93,7 +93,7 @@ class GoofyServer:
     _enable_udp_relay: bool
     _memory_limit_mib: float
 
-    _running: bool = False
+    _running: bool = True
 
     @property
     def io(self) -> GoofyIo:
@@ -313,8 +313,6 @@ class GoofyServer:
                 self.stop()
                 return
             self._log.info("goofy proxy handshake was successful")
-
-            self._running = True
 
             # start the send thread
             self._send_thread = threading.Thread(
