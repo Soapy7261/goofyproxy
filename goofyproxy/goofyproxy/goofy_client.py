@@ -1307,7 +1307,8 @@ class GoofyClient:
             self._udp_relays.pop(udp_relay_id, None)
             self._udp_relays_lock.release()
 
-            self._log.debug("session ended")
+            if self._running:
+                self._log.debug("session ended")
 
     def _control_thread_run(self):
         global keyboard_interrupt

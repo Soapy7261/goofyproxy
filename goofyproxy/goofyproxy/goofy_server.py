@@ -709,7 +709,8 @@ class GoofyServer:
                     data
                 ))
 
-            self._log.debug("UDP relay session ended")
+            if self._running:
+                self._log.debug("UDP relay session ended")
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
