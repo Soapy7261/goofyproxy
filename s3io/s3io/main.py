@@ -204,7 +204,7 @@ def main():
             action="store_true",
             help="restart when an error occurs."
         )
-        default = 60.
+        default = 30.
         p.add_argument(
             "-w",
             "--endless-wait",
