@@ -16,10 +16,10 @@ from goofyproxy import GoofyIo
 from goofyproxy.common import *
 
 
-MAX_FILE_AGE: int = 30
+MAX_FILE_AGE: float = 29.
 "delete s3io files older than this many seconds."
 
-IN_IDX_THRESHOLD: int = 30
+IN_IDX_THRESHOLD: int = 32
 "if we miss this many or more incoming packets, we will raise an error."
 
 
@@ -54,11 +54,12 @@ class S3Io(GoofyIo):
             sender ID of the peer. any incoming file with a different sender ID
             will be ignored.
 
-        interval (float):
-            send-receive cycle interval in seconds.
-
         max_out_size (int):
             maximum outgoing file size in bytes.
+
+        receive_timeout (float):
+            a TimeoutError will be raised in _receive() if the required amount
+            of data isn't received in less than this many seconds.
 
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
@@ -72,8 +73,8 @@ class S3Io(GoofyIo):
     bucket_name: str
     id: str
     peer_id: str
-    interval: float
     max_out_size: int
+    receive_timeout: float
 
     _out_idx: int = 0
     _out_buf: bytearray
@@ -99,8 +100,8 @@ class S3Io(GoofyIo):
         bucket_name: str,
         id: str,
         peer_id: str,
-        interval: float = .05,
         max_out_size: int = 64 * 1024,
+        receive_timeout: float = MAX_FILE_AGE,
         log_level: int | None = None
     ):
         validate_id(id)
@@ -114,8 +115,8 @@ class S3Io(GoofyIo):
         self.bucket_name = bucket_name
         self.id = id
         self.peer_id = peer_id
-        self.interval = float(interval)
         self.max_out_size = int(max_out_size)
+        self.receive_timeout = float(receive_timeout)
 
         self._out_buf = bytearray()
         self._out_buf_lock = threading.Lock()
@@ -175,11 +176,19 @@ class S3Io(GoofyIo):
         self._stopping = True
 
     def _receive(self, size: int) -> bytes:
+        start_time = time.time()
         while True:
             if not self.running():
                 raise ConnectionError("s3io has stopped")
 
-            poll_interval = min(.1, self.interval)
+            if time.time() - start_time > self.receive_timeout:
+                raise TimeoutError(
+                    f"receive timeout: failed to receive {size} bytes in less "
+                    f"than {self.receive_timeout} seconds (input buffer had "
+                    f"{len(self._in_buf)} bytes)."
+                )
+
+            poll_interval = .05
 
             if not self._in_buf_lock.acquire():
                 time.sleep(poll_interval)
@@ -208,7 +217,6 @@ class S3Io(GoofyIo):
         global keyboard_interrupt
         try:
             while not self._stopping:
-                time.sleep(self.interval)
                 self._send_packet_if_needed()
                 self._receive_new_packets()
         except KeyboardInterrupt as e:
@@ -341,16 +349,13 @@ class S3Io(GoofyIo):
             elif data:
                 data = data[1:]
 
-            # add to incoming packets
+            # add to incoming packets (remove older ones with the same index)
             force_acquire(self._in_packets_lock)
-            already_exists = False
-            for packet in self._in_packets:
+            for i in range(len(self._in_packets)):
+                packet = self._in_packets[i]
                 if packet.idx == packet_idx:
-                    self._in_packets_lock.release()
-                    already_exists = True
-                    break
-            if already_exists:
-                continue
+                    self._in_packets.pop(i)
+                    i -= 1
             self._in_packets.append(InPacket(packet_idx, data))
             self._in_packets_lock.release()
 

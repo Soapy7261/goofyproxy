@@ -29,7 +29,6 @@ def run(args: argparse.Namespace):
                 bucket_name=args.bucket_name,
                 id=args.id,
                 peer_id=args.peer_id,
-                interval=args.interval,
                 max_out_size=max_out_size,
             )
 
@@ -65,7 +64,6 @@ def run(args: argparse.Namespace):
                 bucket_name=args.bucket_name,
                 id=args.id,
                 peer_id=args.peer_id,
-                interval=args.interval,
                 max_out_size=max_out_size,
             )
 
@@ -206,21 +204,13 @@ def main():
             action="store_true",
             help="restart when an error occurs."
         )
-        default = 30.
+        default = 60.
         p.add_argument(
             "-w",
             "--endless-wait",
             type=float,
             default=default,
             help=f"[{default=}] how long to sleep in seconds before restarting."
-        )
-        default = .05
-        p.add_argument(
-            "-i",
-            "--interval",
-            type=float,
-            default=default,
-            help=f"[{default=}] send-receive loop interval in seconds."
         )
         default = "64 KiB"
         p.add_argument(
