@@ -473,7 +473,9 @@ class GoofyClient:
                     # avoid blocking forever so we can get KeyboardInterrupt
                     continue
                 except Exception as e:
-                    self._log.fatal(f"accept failed: {format_exception(e)}")
+                    if self._running:
+                        self._log.fatal(
+                            f"accept failed: {format_exception(e)}")
                     break
 
                 if not (self._running and self._accepting_clients):
@@ -500,7 +502,8 @@ class GoofyClient:
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
-            self._log.fatal(format_exception(e))
+            if self._running:
+                self._log.fatal(format_exception(e))
         finally:
             self.stop()
 
@@ -605,7 +608,8 @@ class GoofyClient:
             close_socket(client)
             self.stop()
         except BaseException as e:
-            self._log.error(format_exception(e))
+            if self._running:
+                self._log.error(format_exception(e))
 
             close_socket(client)
 
@@ -1101,7 +1105,8 @@ class GoofyClient:
                     data, sender_addr = relay.sock.recvfrom(65535)
                 except OSError as e:
                     # timeout or socket closed
-                    self._log.debug(format_exception(e))
+                    if self._running:
+                        self._log.debug(format_exception(e))
                     break
 
                 # forward datagram from SOCKS client to target.
@@ -1215,7 +1220,8 @@ class GoofyClient:
             keyboard_interrupt = e
             self.stop()
         except BaseException as e:
-            self._log.error(format_exception(e))
+            if self._running:
+                self._log.error(format_exception(e))
 
     def _cmd_udp_associate(
         self,
@@ -1477,7 +1483,7 @@ class GoofyClient:
 
             if isinstance(e, KeyboardInterrupt):
                 keyboard_interrupt = e
-            else:
+            elif self._running:
                 self._log.fatal(format_exception(e))
 
             try:
@@ -1640,7 +1646,7 @@ class GoofyClient:
 
             if isinstance(e, KeyboardInterrupt):
                 keyboard_interrupt = e
-            else:
+            elif self._running:
                 self._log.fatal(format_exception(e))
 
             self.stop()

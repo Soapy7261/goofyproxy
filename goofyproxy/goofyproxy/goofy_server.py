@@ -48,8 +48,8 @@ class GoofyServer:
         address_filter_type (AddressFilterType):
             if set to `AddressFilterType.Allow`, will only allow remote
             connections to addresses matching `address_filter`. if set to
-            `AddressFilterType.Block`, will block remote connections to addresses
-            matching `address_filter`.
+            `AddressFilterType.Block`, will block remote connections to
+            addresses matching `address_filter`.
 
         fake_bind_address (bool):
             send a fake bind address (0.0.0.0:0) in the open (SOCKS5 CONNECT)
@@ -466,7 +466,8 @@ class GoofyServer:
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
-            self._log.fatal(format_exception(e))
+            if self._running:
+                self._log.fatal(format_exception(e))
         finally:
             if sockets_locked:
                 self._sockets_lock.release()
@@ -560,7 +561,8 @@ class GoofyServer:
             keyboard_interrupt = e
             self.stop()
         except BaseException as e:
-            self._log.error(format_exception(e))
+            if self._running:
+                self._log.error(format_exception(e))
 
     def _cmd_bind(self, packet: GoofyCommandBind):
         global keyboard_interrupt
@@ -651,7 +653,8 @@ class GoofyServer:
             keyboard_interrupt = e
             self.stop()
         except BaseException as e:
-            self._log.error(format_exception(e))
+            if self._running:
+                self._log.error(format_exception(e))
 
     def _cmd_udp_relay(self, packet: GoofyCommandOpenUdpRelay):
         global keyboard_interrupt
@@ -687,7 +690,8 @@ class GoofyServer:
                     data, sender_addr = udp_sock.recvfrom(65535)
                 except OSError as e:
                     # timeout or socket closed
-                    self._log.debug(format_exception(e))
+                    if self._running:
+                        self._log.debug(format_exception(e))
                     break
 
                 if not data:
@@ -711,7 +715,8 @@ class GoofyServer:
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
-            self._log.error(format_exception(e))
+            if self._running:
+                self._log.error(format_exception(e))
         finally:
             if udp_sock is not None:
                 close_socket(udp_sock)
@@ -795,7 +800,7 @@ class GoofyServer:
 
             if isinstance(e, KeyboardInterrupt):
                 keyboard_interrupt = e
-            else:
+            elif self._running:
                 self._log.fatal(format_exception(e))
 
             self.stop()
