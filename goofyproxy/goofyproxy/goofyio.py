@@ -34,8 +34,9 @@ class GoofyIo:
         abstract function that receives exactly `size` bytes.
 
         - must block until the required amount of data is received.
-        - must raise OSError/IOError (or one of its derived classes) when the
-          connection is broken and there's no hope to continue as normal.
+        - must raise OSError/IOError or one of its subclasseswhen the connection
+          is broken and there's no hope to properly receive the required amount
+          of data.
         """
         raise NotImplementedError()
 
@@ -43,19 +44,23 @@ class GoofyIo:
         """
         abstract function for sending every byte in `data`.
 
-        - avoid blocking. if transmission takes too long, push the data to a
-          buffer/queue and transmit on another thread.
-        - must raise OSError/IOError (or one of its derived classes) when the
-          connection is broken and there's no hope to continue as normal.
+        - avoid blocking. push the data to a buffer or queue and transmit on
+          a separate thread.
+        - must raise OSError/IOError or one of its subclasses when the
+          connection is broken and there's no hope to fully send `data`.
         """
         raise NotImplementedError()
 
     def receive(self, size: int) -> bytes:
         b = self._receive(size)
+        if not isinstance(b, bytes):
+            raise ValueError(
+                f"GoofyIo subclass was expected to return bytes, got {type(b)}."
+            )
         if len(b) != size:
             raise ValueError(
-                f"derived class was expected to return buffer with {size=} but "
-                f"returned {len(b)} bytes instead"
+                f"GoofyIo subclass was expected to return {size} bytes, got "
+                f"{len(b)} bytes instead."
             )
         return b
 
@@ -91,8 +96,8 @@ class SocketIo(GoofyIo):
 
 class TxtFileIo(GoofyIo):
     """
-    a `GoofyIo` that creates and reads .txt files with base85 encoding and gzip
-    compression to transfer data.
+    an example `GoofyIo` that creates and reads .txt files with base85 encoding
+    and gzip compression to transfer data.
     """
 
     session_id: str
