@@ -30,6 +30,7 @@ def run(args: argparse.Namespace):
                 id=args.id,
                 peer_id=args.peer_id,
                 max_out_size=max_out_size,
+                interval=args.interval
             )
 
             GoofyServer(
@@ -65,6 +66,7 @@ def run(args: argparse.Namespace):
                 id=args.id,
                 peer_id=args.peer_id,
                 max_out_size=max_out_size,
+                interval=args.interval
             )
 
             GoofyClient(
@@ -212,7 +214,7 @@ def main():
             default=default,
             help=f"[{default=}] how long to sleep in seconds before restarting."
         )
-        default = "64 KiB"
+        default = "200 KiB"
         p.add_argument(
             "-O",
             "--max-out-size",
@@ -220,6 +222,15 @@ def main():
             default=default,
             help=f"[{default=}] maximum outgoing file size in each iteration "
             "of the send-receive loop."
+        )
+        default = .2
+        p.add_argument(
+            "-i",
+            "--interval",
+            type=float,
+            default=default,
+            help=f"[{default=}] minimum delay in seconds between outgoing "
+            "files."
         )
 
     parser_client.add_argument(

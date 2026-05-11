@@ -57,6 +57,9 @@ class S3Io(GoofyIo):
         max_out_size (int):
             maximum outgoing file size in bytes.
 
+        interval (float):
+            minimum delay in seconds between outgoing files.
+
         receive_timeout (float):
             a TimeoutError will be raised in _receive() if the required amount
             of data isn't received in less than this many seconds.
@@ -74,6 +77,7 @@ class S3Io(GoofyIo):
     id: str
     peer_id: str
     max_out_size: int
+    interval: float
     receive_timeout: float
 
     _out_idx: int = 0
@@ -100,7 +104,8 @@ class S3Io(GoofyIo):
         bucket_name: str,
         id: str,
         peer_id: str,
-        max_out_size: int = 64 * 1024,
+        max_out_size: int = 200 * 1024,
+        interval: float = .2,
         receive_timeout: float = MAX_FILE_AGE,
         log_level: int | None = None
     ):
@@ -108,6 +113,10 @@ class S3Io(GoofyIo):
         validate_id(peer_id)
 
         self._log = make_logger(f"s3io", log_level)
+        self._log.warning(
+            "[IMPORTANT NOTICE] your system clock must be accurate to the "
+            "second for s3io to work properly."
+        )
 
         self.endpoint_url = endpoint_url
         self.access_key = access_key
@@ -116,6 +125,7 @@ class S3Io(GoofyIo):
         self.id = id
         self.peer_id = peer_id
         self.max_out_size = int(max_out_size)
+        self.interval = float(interval)
         self.receive_timeout = float(receive_timeout)
 
         self._out_buf = bytearray()
@@ -179,12 +189,12 @@ class S3Io(GoofyIo):
         start_time = time.time()
         while True:
             if not self.running():
-                raise ConnectionError("s3io has stopped")
+                raise ConnectionError("s3io has stopped.")
 
             if time.time() - start_time > self.receive_timeout:
                 raise TimeoutError(
-                    f"receive timeout: failed to receive {size} bytes in less "
-                    f"than {self.receive_timeout} seconds (input buffer had "
+                    f"s3io failed to receive {size} bytes in less than "
+                    f"{self.receive_timeout} seconds (input buffer had "
                     f"{len(self._in_buf)} bytes)."
                 )
 
@@ -207,7 +217,7 @@ class S3Io(GoofyIo):
 
     def _send(self, data: bytes):
         if not self.running():
-            raise ConnectionError("s3io has stopped")
+            raise ConnectionError("s3io has stopped.")
 
         force_acquire(self._out_buf_lock)
         self._out_buf += data
@@ -217,8 +227,14 @@ class S3Io(GoofyIo):
         global keyboard_interrupt
         try:
             while not self._stopping:
+                time_start = time.time()
+
                 self._send_packet_if_needed()
                 self._receive_new_packets()
+
+                remaining_time = time_start + self.interval - time.time()
+                if remaining_time > 0.:
+                    time.sleep(remaining_time)
         except KeyboardInterrupt as e:
             keyboard_interrupt = e
         except BaseException as e:
@@ -283,7 +299,7 @@ class S3Io(GoofyIo):
             )
         except Exception as e:
             raise ConnectionError(
-                f"failed to upload file \"{path}\": {format_exception(e)}"
+                f"s3io failed to upload file \"{path}\": {format_exception(e)}"
             )
 
     def _receive_new_packets(self):
@@ -388,7 +404,7 @@ class S3Io(GoofyIo):
         if self._in_packets[0].idx - self._in_idx > IN_IDX_THRESHOLD:
             self._in_packets_lock.release()
             raise ConnectionError(
-                f"missing too many ({IN_IDX_THRESHOLD}+) incoming files."
+                f"s3io missing too many ({IN_IDX_THRESHOLD}+) incoming files."
             )
 
         force_acquire(self._in_buf_lock)
