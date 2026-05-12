@@ -19,9 +19,6 @@ from goofyproxy.common import *
 MAX_FILE_AGE: float = 29.
 "delete s3io files older than this many seconds."
 
-IN_IDX_THRESHOLD: int = 32
-"if we miss this many or more incoming packets, we will raise an error."
-
 
 class InPacket(NamedTuple):
     idx: int
@@ -198,7 +195,7 @@ class S3Io(GoofyIo):
                     f"{len(self._in_buf)} bytes)."
                 )
 
-            poll_interval = .05
+            poll_interval = .02
 
             if not self._in_buf_lock.acquire():
                 time.sleep(poll_interval)
@@ -355,6 +352,13 @@ class S3Io(GoofyIo):
                 to_be_deleted.append(path)
                 continue
 
+            # skip if the packet index is too far ahead. for the first 3
+            # packets, it must be identical to _in_idx, after that it must be
+            # 16 or less indices ahead of _in_idx.
+            if (self._in_idx < 3 and packet_idx != self._in_idx) or \
+                    (self._in_idx >= 3 and packet_idx - self._in_idx > 16):
+                continue
+
             # download the file
             try:
                 bytes_io = io.BytesIO()
@@ -413,12 +417,6 @@ class S3Io(GoofyIo):
         if not self._in_packets:
             self._in_packets_lock.release()
             return
-
-        if self._in_packets[0].idx - self._in_idx > IN_IDX_THRESHOLD:
-            self._in_packets_lock.release()
-            raise ConnectionError(
-                f"s3io missing too many ({IN_IDX_THRESHOLD}+) incoming files."
-            )
 
         force_acquire(self._in_buf_lock)
         while self._in_packets \
