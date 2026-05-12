@@ -512,7 +512,7 @@ class BincallIo(GoofyIo):
             if not self.running():
                 raise ConnectionError("BincallIo has stopped")
 
-            poll_interval = min(.05, self.interval_min)
+            poll_interval = min(.02, self.interval_min)
 
             if not self._in_buf_lock.acquire():
                 time.sleep(poll_interval)
