@@ -437,7 +437,7 @@ def main():
         type=int,
         help=f"local SOCKS5 proxy server port"
     )
-    default = 4096
+    default = 2048
     parser_client.add_argument(
         "-s",
         "--bufsize",

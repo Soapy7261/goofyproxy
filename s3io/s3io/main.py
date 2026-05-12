@@ -35,7 +35,7 @@ def run(args: argparse.Namespace):
 
             GoofyServer(
                 gio,
-                send_interval=.003,
+                send_interval=.001,
                 address_filter=args.address_filter,
 
                 address_filter_type=AddressFilterType.Allow
@@ -74,8 +74,8 @@ def run(args: argparse.Namespace):
                 host="0.0.0.0",
                 port=args.port,
                 buf_size=args.bufsize,
-                poll_interval=.003,
-                send_interval=.003,
+                poll_interval=.001,
+                send_interval=.001,
                 address_filter=args.address_filter,
 
                 address_filter_type=AddressFilterType.Allow
@@ -240,7 +240,7 @@ def main():
         type=int,
         help=f"local SOCKS5 proxy server port"
     )
-    default = 4096
+    default = 2048
     parser_client.add_argument(
         "-s",
         "--bufsize",
