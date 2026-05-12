@@ -12,6 +12,7 @@ import gzip
 from typing import NamedTuple
 
 import boto3
+from threadpool import *
 from goofyproxy import GoofyIo
 from goofyproxy.common import *
 
@@ -226,8 +227,14 @@ class S3Io(GoofyIo):
             while not self._stopping:
                 time_start = time.time()
 
-                self._send_packet_if_needed()
-                self._receive_new_packets()
+                send_future = ThreadPool.enqueue(
+                    self._send_packet_if_needed
+                )
+                receive_future = ThreadPool.enqueue(
+                    self._receive_new_packets
+                )
+                send_future.get()
+                receive_future.get()
 
                 remaining_time = time_start + self.interval - time.time()
                 if remaining_time > 0.:
