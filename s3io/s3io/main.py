@@ -8,7 +8,7 @@ from goofyproxy import GoofyServer, GoofyClient, AddressFilterType, \
     ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN
 import goofyproxy.common as goofycommon
 
-from s3io import S3Io
+from s3io import S3Io, MAX_FILE_AGE
 
 
 def run(args: argparse.Namespace):
@@ -19,6 +19,13 @@ def run(args: argparse.Namespace):
     max_out_size = goofycommon.parse_data_size(
         args.max_out_size
     )
+
+    if args.endless and args.endless_wait <= MAX_FILE_AGE:
+        print(
+            f"endless_wait={args.endless_wait} must be larger than "
+            f"{MAX_FILE_AGE=}"
+        )
+        return
 
     if args.command == "server":
         while True:
