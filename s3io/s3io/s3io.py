@@ -1,6 +1,6 @@
 """
-provides `ChatIo`, a `GoofyIo` child class that uses a chat client in a web
-browser to send and receive binary data embedded in file messages.
+provides `S3Io`, a `GoofyIo` subclass that creates and reads files on an AWS S3
+"Bucket" to send and receive binary data.
 """
 
 import io
@@ -247,36 +247,17 @@ class S3Io(GoofyIo):
         data = bytes(self._out_buf[:orig_size])
         is_compressed: bool = False
 
-        temp_orig_size = self.max_out_size * 3
-        temp = gzip.compress(self._out_buf[:temp_orig_size])
-        if len(temp) < self.max_out_size:
-            orig_size = temp_orig_size
-            data = temp
-            is_compressed = True
-
-        if not is_compressed:
-            temp_orig_size = self.max_out_size * 2
+        for ratio in [3, 2, 1.5, 1]:
+            temp_orig_size = min(
+                int(self.max_out_size * ratio),
+                len(self._out_buf)
+            )
             temp = gzip.compress(self._out_buf[:temp_orig_size])
-            if len(temp) < self.max_out_size:
+            if len(temp) < min(temp_orig_size, self.max_out_size):
                 orig_size = temp_orig_size
                 data = temp
                 is_compressed = True
-
-        if not is_compressed:
-            temp_orig_size = self.max_out_size * 3 // 2
-            temp = gzip.compress(self._out_buf[:temp_orig_size])
-            if len(temp) < self.max_out_size:
-                orig_size = temp_orig_size
-                data = temp
-                is_compressed = True
-
-        if not is_compressed:
-            temp_orig_size = self.max_out_size
-            temp = gzip.compress(self._out_buf[:temp_orig_size])
-            if len(temp) < self.max_out_size:
-                orig_size = temp_orig_size
-                data = temp
-                is_compressed = True
+                break
 
         self._out_buf = self._out_buf[orig_size:]
         self._out_buf_lock.release()
@@ -368,8 +349,7 @@ class S3Io(GoofyIo):
             except Exception as e:
                 if not self._stopping:
                     self._log.warning(
-                        f"failed to download file \"{path}\": "
-                        f"{format_exception(e)}"
+                        f"failed to download {path}: {format_exception(e)}"
                     )
                 continue
 
@@ -377,7 +357,7 @@ class S3Io(GoofyIo):
             to_be_deleted.append(path)
 
             # decompress if needed
-            if data and data[0] == b"C":
+            if data and data[0] == ord('C'):
                 data = gzip.decompress(data[1:])
             elif data:
                 data = data[1:]

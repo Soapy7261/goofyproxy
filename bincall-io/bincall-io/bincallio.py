@@ -1,5 +1,5 @@
 """
-provides `BincallIo`, a `GoofyIo` child class for data transfer through bincall
+provides `BincallIo`, a `GoofyIo` subclass for data transfer through bincall
 binary calls.
 """
 
@@ -821,36 +821,17 @@ class BincallIo(GoofyIo):
         data = bytes(self._out_buf[:orig_size])
         is_compressed: bool = False
 
-        temp_orig_size = self.max_out_packet_size * 3
-        temp = gzip.compress(self._out_buf[:temp_orig_size])
-        if len(temp) < self.max_out_packet_size:
-            orig_size = temp_orig_size
-            data = temp
-            is_compressed = True
-
-        if not is_compressed:
-            temp_orig_size = self.max_out_packet_size * 2
+        for ratio in [3, 2, 1.5, 1]:
+            temp_orig_size = min(
+                int(self.max_out_packet_size * ratio),
+                len(self._out_buf)
+            )
             temp = gzip.compress(self._out_buf[:temp_orig_size])
-            if len(temp) < self.max_out_packet_size:
+            if len(temp) < min(temp_orig_size, self.max_out_packet_size):
                 orig_size = temp_orig_size
                 data = temp
                 is_compressed = True
-
-        if not is_compressed:
-            temp_orig_size = self.max_out_packet_size * 3 // 2
-            temp = gzip.compress(self._out_buf[:temp_orig_size])
-            if len(temp) < self.max_out_packet_size:
-                orig_size = temp_orig_size
-                data = temp
-                is_compressed = True
-
-        if not is_compressed:
-            temp_orig_size = self.max_out_packet_size
-            temp = gzip.compress(self._out_buf[:temp_orig_size])
-            if len(temp) < self.max_out_packet_size:
-                orig_size = temp_orig_size
-                data = temp
-                is_compressed = True
+                break
 
         self._out_buf = self._out_buf[orig_size:]
         self._out_buf_lock.release()
@@ -916,7 +897,7 @@ class BincallIo(GoofyIo):
             self._raw_in_buf = self._raw_in_buf[4 + data_len:]
 
             # decompress if needed
-            if packet[0] == b"C":
+            if packet[0] == ord('C'):
                 packet = gzip.decompress(packet[1:])
             else:
                 packet = packet[1:]
