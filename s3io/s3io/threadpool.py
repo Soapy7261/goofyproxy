@@ -3,7 +3,7 @@ import sys
 import threading
 import queue
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Optional, Self
 
 
 class JobFuture:
@@ -45,7 +45,7 @@ class JobFuture:
 class ThreadPool:
     """singleton thread pool"""
 
-    _instance: ThreadPool | None = None
+    _instance: Optional["ThreadPool"] = None
     _lock = threading.Lock()
 
     def __init__(self, num_threads: int | None = None) -> None:
@@ -63,7 +63,7 @@ class ThreadPool:
             t.start()
 
     @classmethod
-    def _get_instance(cls) -> ThreadPool:
+    def _get_instance(cls) -> Self:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
