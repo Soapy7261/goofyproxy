@@ -280,8 +280,22 @@ def format_addr(addr: object) -> str:
     return str(addr)
 
 
-def format_bytes(b: bytes) -> str:
-    return b.hex('|').upper()
+def format_bytes(
+    b: bytes,
+    max_size: int = 64
+) -> str:
+    s = f"[{format_data_size(len(b))}]"
+    if not b:
+        return s
+
+    if max_size < 1 or len(b) <= max_size:
+        return f"{s} {b.hex('|').upper()}"
+
+    small_half = max_size // 2
+    big_half = max_size - small_half
+    return \
+        f"{s} {b[:big_half].hex('|').upper()}..." \
+        f"{b[-small_half:].hex('|').upper()}"
 
 
 def format_data_size(n_bytes: int) -> str:
