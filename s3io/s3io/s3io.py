@@ -243,44 +243,54 @@ class S3Io(GoofyIo):
         finally:
             self.stop()
 
+    def _compress_out_data_if_worth_it(self) -> tuple[bytes, bool]:
+        force_acquire(self._out_buf_lock)
+
+        orig_size = self.max_out_size
+        data = bytes(self._out_buf[:orig_size])
+        is_compressed: bool = False
+
+        temp_orig_size = self.max_out_size * 3
+        temp = gzip.compress(self._out_buf[:temp_orig_size])
+        if len(temp) < self.max_out_size:
+            orig_size = temp_orig_size
+            data = temp
+            is_compressed = True
+
+        if not is_compressed:
+            temp_orig_size = self.max_out_size * 2
+            temp = gzip.compress(self._out_buf[:temp_orig_size])
+            if len(temp) < self.max_out_size:
+                orig_size = temp_orig_size
+                data = temp
+                is_compressed = True
+
+        if not is_compressed:
+            temp_orig_size = self.max_out_size * 3 // 2
+            temp = gzip.compress(self._out_buf[:temp_orig_size])
+            if len(temp) < self.max_out_size:
+                orig_size = temp_orig_size
+                data = temp
+                is_compressed = True
+
+        if not is_compressed:
+            temp_orig_size = self.max_out_size
+            temp = gzip.compress(self._out_buf[:temp_orig_size])
+            if len(temp) < self.max_out_size:
+                orig_size = temp_orig_size
+                data = temp
+                is_compressed = True
+
+        self._out_buf = self._out_buf[orig_size:]
+        self._out_buf_lock.release()
+
+        return data, is_compressed
+
     def _send_packet_if_needed(self):
         if self._stopping:
             return
 
-        force_acquire(self._out_buf_lock)
-
-        # use compression if it's worth it
-        data_orig_size = self.max_out_size
-        data = bytes(self._out_buf[:data_orig_size])
-        is_compressed = False
-        if len(self._out_buf) > self.max_out_size:
-            orig_size = self.max_out_size * 3
-            temp = gzip.compress(self._out_buf[:orig_size])
-            if len(temp) < self.max_out_size:
-                data_orig_size = orig_size
-                data = temp
-                is_compressed = True
-
-            if not is_compressed:
-                orig_size = self.max_out_size * 2
-                temp = gzip.compress(self._out_buf[:orig_size])
-                if len(temp) < self.max_out_size:
-                    data_orig_size = orig_size
-                    data = temp
-                    is_compressed = True
-
-            if not is_compressed:
-                orig_size = self.max_out_size * 3 // 2
-                temp = gzip.compress(self._out_buf[:orig_size])
-                if len(temp) < self.max_out_size:
-                    data_orig_size = orig_size
-                    data = temp
-                    is_compressed = True
-        self._out_buf = \
-            self._out_buf[data_orig_size:]
-
-        self._out_buf_lock.release()
-
+        data, is_compressed = self._compress_out_data_if_worth_it()
         if not data:
             return
 
