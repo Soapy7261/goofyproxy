@@ -393,7 +393,7 @@ class GoofyServer:
                     if self._enable_udp_relay:
                         t = threading.Thread(
                             target=self._cmd_udp_relay,
-                            name=f"[udp relay] {packet.udp_relay_id_u16}",
+                            name=f"[UDP relay] {packet.udp_relay_id_u16}",
                             args=(packet,),
                             daemon=True,
                         )
