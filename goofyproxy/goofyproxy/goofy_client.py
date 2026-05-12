@@ -43,6 +43,8 @@ REP_ATYP_NOT_SUPPORTED = 8
 # reserved byte, must be 0x00
 RSV = 0
 
+DIRECT_RELAY_BUF_SIZE = 4096
+
 
 @dataclass
 class GoofyClientSocket:
@@ -898,7 +900,7 @@ class GoofyClient:
             for src in readable:
                 dst = b if src is a else a
                 try:
-                    data = src.recv(self._buf_size)
+                    data = src.recv(DIRECT_RELAY_BUF_SIZE)
                     if not data:
                         return
                     dst.sendall(data)
