@@ -58,10 +58,6 @@ class S3Io(GoofyIo):
         interval (float):
             minimum delay in seconds between outgoing files.
 
-        receive_timeout (float):
-            a TimeoutError will be raised in _receive() if the required amount
-            of data isn't received in less than this many seconds.
-
         log_level (int | None):
             logging level (e.g. `logging.INFO`)
     """
@@ -76,12 +72,13 @@ class S3Io(GoofyIo):
     peer_id: str
     max_out_size: int
     interval: float
-    receive_timeout: float
 
+    _last_out_time: float = 0.
     _out_idx: int = 0
     _out_buf: bytearray
     _out_buf_lock: threading.Lock
 
+    _last_in_time: float = 0.
     _in_packets: list[InPacket]
     _in_packets_lock: threading.Lock
 
@@ -104,7 +101,6 @@ class S3Io(GoofyIo):
         peer_id: str,
         max_out_size: int = 200 * 1024,
         interval: float = .2,
-        receive_timeout: float = MAX_FILE_AGE,
         log_level: int | None = None
     ):
         validate_id(id)
@@ -124,7 +120,6 @@ class S3Io(GoofyIo):
         self.peer_id = peer_id
         self.max_out_size = int(max_out_size)
         self.interval = float(interval)
-        self.receive_timeout = float(receive_timeout)
 
         self._out_buf = bytearray()
         self._out_buf_lock = threading.Lock()
@@ -184,16 +179,13 @@ class S3Io(GoofyIo):
         self._stopping = True
 
     def _receive(self, size: int) -> bytes:
-        start_time = time.time()
         while True:
             if not self.running():
                 raise ConnectionError("s3io has stopped.")
 
-            if time.time() - start_time > self.receive_timeout:
+            if time.time() - self._last_in_time > MAX_FILE_AGE:
                 raise TimeoutError(
-                    f"s3io failed to receive {size} bytes in less than "
-                    f"{self.receive_timeout} seconds (input buffer had "
-                    f"{len(self._in_buf)} bytes)."
+                    f"s3io received no packets in over {MAX_FILE_AGE=} seconds."
                 )
 
             poll_interval = .02
@@ -276,12 +268,20 @@ class S3Io(GoofyIo):
             return
 
         data, is_compressed = self._compress_out_data_if_worth_it()
-        if not data:
-            return
 
-        if is_compressed:
+        elapsed_since_last_packet = time.time() - self._last_out_time
+        if not data and elapsed_since_last_packet < MAX_FILE_AGE / 3.:
+            return
+        elif not data:
+            # too much time passed with no outgoing packets, so we send an empty
+            # packet to say we're alive.
+            data = b""
+
+        self._last_out_time = time.time()
+
+        if data and is_compressed:
             data = b"C" + data
-        else:
+        elif data:
             data = b"c" + data
 
         path = f"s3io#{self.id}#{self.peer_id}#{self._out_idx}"
@@ -363,10 +363,13 @@ class S3Io(GoofyIo):
             # successful read, can be safely deleted now
             to_be_deleted.append(path)
 
+            # update the last incoming packet receive time
+            self._last_in_time = time.time()
+
             # decompress if needed
             if data and data[0] == ord('C'):
                 data = gzip.decompress(data[1:])
-            elif data:
+            elif data and data[0] == ord('c'):
                 data = data[1:]
 
             # add to incoming packets (remove older ones with the same index)
