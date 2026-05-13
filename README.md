@@ -32,6 +32,9 @@ fundumental classes we can build upon: `GoofyIo`, `GoofyServer` and
 [bincall-io](./bincall-io) uses a [bincall Server](./bincall) to transfer bytes
 through "binary calls" and runs goofyproxy on top of that.
 
+# s3io
+[s3io](./s3io) creates and reads files on an AWS S3 Bucket for data transfer.
+
 # VideoIo
 
 [VideoIo](./videoio) allows data transfer over video calls and runs goofyproxy

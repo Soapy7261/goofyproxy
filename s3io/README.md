@@ -1,7 +1,7 @@
 # s3io
 
 `S3Io` is a child class of `GoofyIo` that creates and reads files on an AWS S3
-Bucket for data trasnfer.
+Bucket for data transfer.
 
 The main script (`main.py`) provides a command line program that runs
 [goofyproxy](../goofyproxy) on top of s3io.
