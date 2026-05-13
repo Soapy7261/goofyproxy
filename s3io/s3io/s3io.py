@@ -340,11 +340,11 @@ class S3Io(GoofyIo):
                 to_be_deleted.append(path)
                 continue
 
-            # skip if the packet index is too far ahead. for the first 3
+            # skip if the packet index is too far ahead. for the first 4
             # packets, it must be identical to _in_idx, after that it must be
             # 16 or less indices ahead of _in_idx.
-            if (self._in_idx < 3 and packet_idx != self._in_idx) or \
-                    (self._in_idx >= 3 and packet_idx - self._in_idx > 16):
+            if (self._in_idx < 4 and packet_idx != self._in_idx) or \
+                    (packet_idx - self._in_idx > 16):
                 continue
 
             # download the file
