@@ -1,6 +1,7 @@
 import socket
 import threading
 import time
+import random
 from dataclasses import dataclass, field
 import logging
 from pympler.asizeof import asizeof
@@ -79,7 +80,14 @@ class GoofyServer:
 
     _io: GoofyIo
 
-    _buf_size: int = 4096
+    _max_relay_size: int = 32768
+    """
+    maximum number of bytes forwarded from all remote sockets to the goofy
+    client (in socket IO packets) before we send other enqueued packets
+    (typically event packets for updating socket statuses) in each iteration of
+    the send thread.
+    """
+
     _timeout: float = 60.
     _bind_timeout: float = 60.
     _udp_timeout: float = 60.
@@ -100,13 +108,13 @@ class GoofyServer:
         return self._io
 
     @property
-    def buf_size(self) -> int:
+    def max_relay_size(self) -> int:
         """
         the buffer size and timeouts are typically overridden by the client
         using a `GoofyCommandSetLimits` packet right after handshake so the
         initial values don't matter much.
         """
-        return self._buf_size
+        return self._max_relay_size
 
     @property
     def timeout(self) -> float:
@@ -335,7 +343,7 @@ class GoofyServer:
                 sockets_locked = True
 
                 if isinstance(packet, GoofyCommandSetLimits):
-                    self._buf_size = packet.buf_size
+                    self._max_relay_size = packet.max_relay_size
                     self._timeout = packet.timeout
                     self._bind_timeout = packet.bind_timeout
                     self._udp_timeout = packet.udp_timeout
@@ -748,18 +756,46 @@ class GoofyServer:
                 force_acquire(self._sockets_lock)
                 sockets_locked = True
 
-                socket_ids_copy = list(self._sockets.keys())
-                for socket_id in socket_ids_copy:
-                    sock = self._sockets[socket_id]
-                    force_acquire(sock.lock)
+                total_bytes_relayed: int = 0
+                while True:
+                    # gather a list of ready-to-read (or ready-to-error)
+                    # sockets.
+                    sockets_copy = list(self._sockets.items())
+                    ready_to_read: list[tuple[int, GoofyServerSocket]] = []
+                    for socket_id, sock in sockets_copy:
+                        force_acquire(sock.lock)
 
-                    if not sock.relaying:
-                        sock.lock.release()
-                        continue
+                        if not sock.relaying:
+                            sock.lock.release()
+                            continue
 
-                    try:
-                        if is_ready_to_read(sock.remote):
-                            data = sock.remote.recv(self._buf_size)
+                        timed_out = \
+                            time.time() - sock.last_io_time > self._timeout
+                        if is_ready_to_read(sock.remote) or timed_out:
+                            ready_to_read.append((socket_id, sock))
+                        else:
+                            sock.lock.release()
+
+                    # break if there are no ready-to-read sockets
+                    if not ready_to_read:
+                        break
+
+                    # divide max relay size by the number of ready-to-read
+                    # sockets.
+                    relay_size: int = max(
+                        self._max_relay_size // len(ready_to_read),
+                        1
+                    )
+
+                    # iterate in a randomized order
+                    random.shuffle(ready_to_read)
+                    for socket_id, sock in ready_to_read:
+                        # read and relay data or handle errors and timeouts
+                        try:
+                            if time.time() - sock.last_io_time > self._timeout:
+                                raise TimeoutError()
+
+                            data = sock.remote.recv(relay_size)
                             sock.last_io_time = time.time()
                             if not data:
                                 raise OSError()
@@ -768,23 +804,30 @@ class GoofyServer:
                                 socket_id,
                                 data
                             ))
-                        elif time.time() - sock.last_io_time > self._timeout:
-                            raise TimeoutError()
-                    except OSError:
-                        sock.relaying = False
-                        close_socket(sock.remote)
+                            total_bytes_relayed += len(data)
 
-                        self._sockets.pop(socket_id, None)
-                        packets_to_send.append(
-                            GoofyCommandCloseSocket(socket_id)
-                        )
-                    finally:
-                        sock.lock.release()
+                            if sock.status == GoofySocketStatus.Closed:
+                                raise OSError()
+                        except OSError as e:
+                            sock.status = GoofySocketStatus.Closed
+                            sock.relaying = False
+                            close_socket(sock.remote)
+
+                            self._sockets.pop(socket_id, None)
+                            packets_to_send.append(
+                                GoofyCommandCloseSocket(socket_id)
+                            )
+                        finally:
+                            sock.lock.release()
+
+                        # break if total bytes relayed exceeds max relay size
+                        if total_bytes_relayed >= self._max_relay_size:
+                            break
 
                 self._sockets_lock.release()
                 sockets_locked = False
 
-                # actually send the packets we've been accumulating
+                # send the accumulated packets
                 data = bytes()
                 for packet in packets_to_send:
                     data += packet.to_bytes()

@@ -504,10 +504,10 @@ class GoofyPacket:
 class GoofyCommandSetLimits(GoofyPacket):
     """
     goofy packet sent by the goofy client commanding the server to update limits
-    such as timeouts and the relay buffer size.
+    such as timeouts and relay size.
     """
 
-    buf_size: int
+    max_relay_size: int
     timeout: float
     bind_timeout: float
     udp_timeout: float
@@ -518,7 +518,7 @@ class GoofyCommandSetLimits(GoofyPacket):
 
     def _to_bytes(self) -> bytes:
         return self._packet_type().to_bytes(1) \
-            + self.buf_size.to_bytes(4) \
+            + self.max_relay_size.to_bytes(4) \
             + encode_float32(self.timeout) \
             + encode_float32(self.bind_timeout) \
             + encode_float32(self.udp_timeout)

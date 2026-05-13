@@ -153,7 +153,9 @@ def run(args: argparse.Namespace):
                 gio,
                 host="0.0.0.0",
                 port=args.port,
-                buf_size=args.bufsize,
+                max_relay_size=goofycommon.parse_data_size(
+                    args.max_relay_size
+                ),
                 address_filter=args.address_filter,
 
                 address_filter_type=AddressFilterType.Allow
@@ -434,13 +436,19 @@ def main():
         type=int,
         help=f"local SOCKS5 proxy server port"
     )
-    default = 2048
+    default = "16 KiB"
     parser_client.add_argument(
         "-s",
-        "--bufsize",
-        type=int,
+        "--max-relay-size",
+        type=str,
         default=default,
-        help=f"[{default=}] relay buffer size in bytes"
+        help=f"[{default=}] maximum number of bytes forwarded from all client "
+        "sockets to the goofy server (in socket IO packets) before we send "
+        "other enqueued packets (typically command packets for opening sockets "
+        "or UDP relays) in each iteration of the GoofyClient's send thread.\n"
+        "NOTE: this parameter is always sent to the goofy server in a "
+        "GoofyCommandSetLimits packet, so the goofy server will use the same "
+        "value when forwarding data from remote sockets to the goofy client."
     )
 
     default = ADDRESS_FILTER_LAN
