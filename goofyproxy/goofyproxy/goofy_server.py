@@ -80,7 +80,7 @@ class GoofyServer:
 
     _io: GoofyIo
 
-    _max_relay_size: int = 32768
+    _max_relay_size: int = 16384
     """
     maximum number of bytes forwarded from all remote sockets to the goofy
     client (in socket IO packets) before we send other enqueued packets

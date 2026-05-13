@@ -403,7 +403,7 @@ class GoofyClient:
         io: GoofyIo,
         host: str = "0.0.0.0",
         port: int = 1080,
-        max_relay_size: int = 32768,
+        max_relay_size: int = 16384,
         backlog: int = 200,
         timeout: float = 60.0,
         bind_timeout: float = 60.0,
