@@ -370,9 +370,6 @@ def main():
         "failed, we have no way of sending a proper error to the local client "
         "because we're already started relaying, so we'll just close the "
         "connection.\n"
-        "4. some clients may use a shorter timeout for IO than for the initial "
-        "connection and close the connection before we ever get a real "
-        "response from the remote target.\n"
         "NOTE: this only applies to proxied connections, not direct (bypassed) "
         "ones."
     )
