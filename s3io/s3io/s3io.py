@@ -17,7 +17,7 @@ from goofyproxy import GoofyIo
 from goofyproxy.common import *
 
 
-MAX_FILE_AGE: float = 29.
+MAX_FILE_AGE: float = 29.5
 "delete s3io files older than this many seconds."
 
 
