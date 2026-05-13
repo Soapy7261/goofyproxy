@@ -805,11 +805,7 @@ class GoofyServer:
                                 data
                             ))
                             total_bytes_relayed += len(data)
-
-                            if sock.status == GoofySocketStatus.Closed:
-                                raise OSError()
                         except OSError as e:
-                            sock.status = GoofySocketStatus.Closed
                             sock.relaying = False
                             close_socket(sock.remote)
 
