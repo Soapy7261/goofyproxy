@@ -56,8 +56,9 @@ ADDRESS_FILTER_LAN = (
     "169.254.0.0/16:*;"
     "[::1]:*;"
     "[fc00::]/7:*;"
-    "[fe80::]/10:*;"
+    "[fe80::]/10:*"
 )
+"local network addresses"
 
 
 class AddressFilterType(IntEnum):

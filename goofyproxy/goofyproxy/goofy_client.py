@@ -397,7 +397,7 @@ class GoofyClient:
         bind_timeout: float = 60.0,
         udp_timeout: float = 60.0,
         poll_interval: float = .01,
-        send_interval: float = .004,
+        send_interval: float = .005,
         address_filter: str = "",
         address_filter_type: AddressFilterType = AddressFilterType.Block,
         bypass_filter: str = ADDRESS_FILTER_LAN,
