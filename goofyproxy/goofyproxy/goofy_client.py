@@ -1501,9 +1501,9 @@ class GoofyClient:
                         finally:
                             sock.lock.release()
 
-                        # break if total bytes relayed exceeds max relay size
-                        if total_bytes_relayed >= self._max_relay_size:
-                            break
+                    # break if total bytes relayed exceeds max relay size
+                    if total_bytes_relayed >= self._max_relay_size:
+                        break
 
                 self._sockets_lock.release()
                 sockets_locked = False
