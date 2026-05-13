@@ -221,7 +221,7 @@ class GoofyClient:
     def max_relay_size(self, value: int):
         value = int(value)
         if value < 1:
-            raise ValueError("max relay size must be at least 1")
+            raise ValueError("max_relay_size must be at least 1")
         self._max_relay_size = value
         self._sync_limits()
 
@@ -424,10 +424,13 @@ class GoofyClient:
 
         self._log = make_logger(f"GoofyClient", log_level)
 
+        if int(max_relay_size) < 1:
+            raise ValueError("max_relay_size must be at least 1")
+
         self._io = io
         self._host = host
         self._port = int(port)
-        self.max_relay_size = max_relay_size
+        self._max_relay_size = int(max_relay_size)
         self._backlog = int(backlog)
         self._timeout = float(timeout)
         self._bind_timeout = float(bind_timeout)
