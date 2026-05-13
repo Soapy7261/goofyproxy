@@ -240,7 +240,7 @@ class GoofyServer:
     def __init__(
         self,
         io: GoofyIo,
-        send_interval: float = .005,
+        send_interval: float = .004,
         address_filter: str = ADDRESS_FILTER_LAN,
         address_filter_type: AddressFilterType = AddressFilterType.Block,
         fake_bind_address: bool = True,
