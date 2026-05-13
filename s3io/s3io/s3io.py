@@ -179,6 +179,9 @@ class S3Io(GoofyIo):
         self._stopping = True
 
     def _receive(self, size: int) -> bytes:
+        if self._last_in_time < .01:
+            self._last_in_time = time.time()
+
         while True:
             if not self.running():
                 raise ConnectionError("s3io has stopped.")
