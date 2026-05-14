@@ -160,428 +160,432 @@ async function handleRequest(
     req: IncomingMessage,
     res: ServerResponse
 ) {
-    const url = new URL(req.url || '', `https://${req.headers.host}`);
+    try {
+        const url = new URL(req.url || '', `https://${req.headers.host}`);
 
-    let method = url.searchParams.get('method') || "";
-    if (url.pathname !== CONFIG.BINCALL_API_PATH
-        && url.pathname !== CONFIG.BINCALL_API_PATH + '/') {
-        method = "";
-    }
-
-    // Handle auth
-    if (method === 'auth') {
-        const authParam = url.searchParams.get('cred');
-
-        if (authParam == null) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ authResult: 'missing auth parameter' }));
-            return;
+        let method = url.searchParams.get('method') || "";
+        if (url.pathname !== CONFIG.BINCALL_API_PATH
+            && url.pathname !== CONFIG.BINCALL_API_PATH + '/') {
+            method = "";
         }
 
-        // Decode auth
-        const authData = decodeAuth(authParam);
-        if (!authData) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ authResult: 'failed to decode auth' }));
-            return;
-        }
+        // Handle auth
+        if (method === 'auth') {
+            const authParam = url.searchParams.get('cred');
 
-        const { userId, password } = authData;
-
-        // Validate userId
-        if (!validateUserId(userId)) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ authResult: 'invalid user ID' }));
-            return;
-        }
-
-        // Check if user exists
-        const userExists = await userService.userExists(userId);
-
-        if (userExists) {
-            // Verify password
-            const isVerified = await userService.verifyUser(userId, password);
-
-            if (isVerified) {
-                // Auth successful
+            if (authParam == null) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ authResult: 'ok' }));
-            } else {
-                // Password incorrect
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ authResult: 'incorrect password' }));
-            }
-        } else {
-            // User doesn't exist - create new user
-            if (!validatePassword(password)) {
-                // Password validation failed
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ authResult: 'failed to create new user: bad password' }));
+                res.end(JSON.stringify({ authResult: 'missing auth parameter' }));
                 return;
             }
 
-            const newUser = await userService.createUser(userId, password);
-
-            if (newUser) {
-                // User created successfully
+            // Decode auth
+            const authData = decodeAuth(authParam);
+            if (!authData) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ authResult: 'ok-created' }));
+                res.end(JSON.stringify({ authResult: 'failed to decode auth' }));
+                return;
+            }
+
+            const { userId, password } = authData;
+
+            // Validate userId
+            if (!validateUserId(userId)) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ authResult: 'invalid user ID' }));
+                return;
+            }
+
+            // Check if user exists
+            const userExists = await userService.userExists(userId);
+
+            if (userExists) {
+                // Verify password
+                const isVerified = await userService.verifyUser(userId, password);
+
+                if (isVerified) {
+                    // Auth successful
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ authResult: 'ok' }));
+                } else {
+                    // Password incorrect
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ authResult: 'incorrect password' }));
+                }
             } else {
-                // User creation failed
+                // User doesn't exist - create new user
+                if (!validatePassword(password)) {
+                    // Password validation failed
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ authResult: 'failed to create new user: bad password' }));
+                    return;
+                }
+
+                const newUser = await userService.createUser(userId, password);
+
+                if (newUser) {
+                    // User created successfully
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ authResult: 'ok-created' }));
+                } else {
+                    // User creation failed
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ authResult: 'failed to create new user' }));
+                }
+            }
+            return;
+        }
+
+        // Handle delete-acc
+        if (method === 'delete-acc') {
+            const authParam = url.searchParams.get('cred');
+            if (authParam == null) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ authResult: 'failed to create new user' }));
+                res.end(JSON.stringify({ authResult: 'no auth param' }));
+                return;
             }
-        }
-        return;
-    }
 
-    // Handle delete-acc
-    if (method === 'delete-acc') {
-        const authParam = url.searchParams.get('cred');
-        if (authParam == null) {
+            const { authResult, userId } = await authenticate(authParam)
+            if (authResult !== "ok") {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ authResult: authResult }));
+                return;
+            }
+
+            let deleteResult = await userService.deleteUser(userId)
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ authResult: 'no auth param' }));
-            return;
-        }
-
-        const { authResult, userId } = await authenticate(authParam)
-        if (authResult !== "ok") {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ authResult: authResult }));
-            return;
-        }
-
-        let deleteResult = await userService.deleteUser(userId)
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            authResult: authResult,
-            deleteResult: deleteResult ? 'ok' : 'failed'
-        }));
-
-        const release = await currentCallsMutex.acquire();
-        for (let i = 0; i < currentCalls.length; i++) {
-            const call = currentCalls[i];
-            let foundUser = false;
-            if (call.user0 === userId) {
-                foundUser = true;
-                const release = await call.user0PacketsMutex.acquire();
-                call.user0Packets.push(Buffer.alloc(0));
-                release();
-            }
-            if (call.user1 === userId) {
-                foundUser = true;
-                const release = await call.user1PacketsMutex.acquire();
-                call.user1Packets.push(Buffer.alloc(0));
-                release();
-            }
-
-            if (!foundUser) {
-                continue;
-            }
-            currentCalls.splice(i, 1);
-            i--;
-        }
-        release();
-
-        return;
-    }
-
-    // Handle dummy
-    if (method === 'dummy') {
-        const length = 10 + Math.floor(Math.random() * 991);
-        res.writeHead(
-            200,
-            {
-                'Content-Type': 'text/plain',
-                'Content-Length': length
-            }
-        );
-        res.end(generateRandomAnsiString(length));
-        return;
-    }
-
-    // Handle whos-calling
-    if (method === 'whos-calling') {
-        const authParam = url.searchParams.get('cred');
-        if (authParam == null) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ authResult: 'no auth param' }));
-            return;
-        }
-
-        const { authResult, userId } = await authenticate(authParam)
-        if (authResult !== "ok") {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ authResult: authResult }));
-            return;
-        }
-
-        // Clean up old calls
-        await userService.cleanupOldCalls(userId);
-
-        // Get incoming calls
-        const incomingCalls = await userService.getIncomingCalls(userId);
-        const sixtySecondsAgo = Date.now() - 60000;
-
-        // Only the calls that are not older than 60 seconds and not answered
-        // + remove the answered field.
-        const recentCalls = incomingCalls
-            .filter(call => call.timestamp > sixtySecondsAgo && !call.answered)
-            .map(call => ({
-                caller: call.caller,
-                timestamp: call.timestamp,
-            }));
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            authResult: authResult,
-            calls: recentCalls,
-        }));
-        return;
-    }
-
-    // Handle connection-modes
-    if (method === 'connection-modes') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            connectionModes: ['websocket', 'http', 'http-b85']
-        }));
-        return;
-    }
-
-    // Handle call-http and pickup-http
-    const isCallRequest = method === 'call-http';
-    const isPickupRequest = method === 'pickup-http';
-    if (isCallRequest || isPickupRequest) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-
-        const authParam = url.searchParams.get('cred');
-        const peerParam = url.searchParams.get('peer');
-
-        let result: Array<string | Call> | null = null;
-        if (isCallRequest) {
-            makeCall(authParam, peerParam)
-                .then(v => { result = v; })
-                .catch(reason => {
-                    console.error('makeCall():', reason);
-                    result = ['no-result'];
-                });
-            while (result == null) {
-                res.write('~')
-                await sleep(CONFIG.CALL_ANSWER_POLL_INTERVAL_MS);
-            }
-        } else {
-            try {
-                result = await pickup(authParam, peerParam);
-            } catch (error) {
-                console.error('pickup():', error);
-                result = ['no-result'];
-            }
-        }
-
-        if (result.length < 1) {
             res.end(JSON.stringify({
-                result: 'no-result'
+                authResult: authResult,
+                deleteResult: deleteResult ? 'ok' : 'failed'
             }));
-            return;
-        }
-
-        const message = result[0] as string;
-        res.end(JSON.stringify({
-            result: message
-        }));
-
-        if (!message.startsWith("call-start#")) {
-            return;
-        }
-
-        let call = result[1] as Call;
-        let userId = result[3] as string;
-        while (true) {
-            await sleep(10_000);
-            if (call.endedAfterEmptyPacket) {
-                break;
-            }
 
             const release = await currentCallsMutex.acquire();
-            if (currentCalls.filter(
-                (v, idx, arr) => v.id === call.id
-            ).length < 1) {
-                release();
-                break;
-            }
-            release();
-
-            if (call.user0 === userId && Date.now() - call.user0LastActivity > 30_000) {
-                const release = await call.user0PacketsMutex.acquire();
-                call.user0Packets.push(Buffer.alloc(0));
-                release();
-                break;
-            } else if (call.user1 === userId && Date.now() - call.user1LastActivity > 30_000) {
-                const release = await call.user1PacketsMutex.acquire();
-                call.user1Packets.push(Buffer.alloc(0));
-                release();
-                break;
-            }
-        }
-        return;
-    }
-
-    // Handle http-chunk and http-chunk-b85
-    const isHttpChunkReq = method === 'http-chunk';
-    const isHttpChunkB85Req = method === 'http-chunk-b85';
-    if (isHttpChunkReq || isHttpChunkB85Req) {
-        const authParam = url.searchParams.get('cred');
-        const peerParam = url.searchParams.get('peer');
-        const callIdParam = url.searchParams.get('call-id');
-
-        if (authParam == null || peerParam == null || callIdParam == null) {
-            writeHttpChunkResponse(res, isHttpChunkB85Req, 'missing parameters');
-            return;
-        }
-
-        const { authResult, userId } = await authenticate(authParam)
-        if (authResult !== "ok") {
-            writeHttpChunkResponse(res, isHttpChunkB85Req, authResult);
-            return;
-        }
-
-        let callId: number;
-        try {
-            callId = parseInt(callIdParam);
-        } catch (error) {
-            writeHttpChunkResponse(res, isHttpChunkB85Req, 'call-id must be a valid integer');
-            return;
-        }
-
-        const release2 = await currentCallsMutex.acquire();
-        const matchedCalls = currentCalls.filter(c => c.id === callId);
-        release2();
-        if (matchedCalls.length < 1) {
-            writeHttpChunkResponse(res, isHttpChunkB85Req, 'end');
-            return;
-        }
-        if (matchedCalls.length > 1) {
-            writeHttpChunkResponse(res, isHttpChunkB85Req, 'duplicated call ID');
-            return;
-        }
-        const call = matchedCalls[0];
-
-        // Make references to our and the other sides' packet array and mutex
-        let callKey = call.user0Key;
-        let myPackets = call.user0Packets;
-        let myPakcetsMutex = call.user0PacketsMutex;
-        let theirPackets = call.user1Packets;
-        let theirPakcetsMutex = call.user1PacketsMutex;
-        let theirId = call.user1;
-        if (userId === call.user1 && peerParam === call.user0) {
-            callKey = call.user1Key;
-            myPackets = call.user1Packets;
-            myPakcetsMutex = call.user1PacketsMutex;
-            theirPackets = call.user0Packets;
-            theirPakcetsMutex = call.user0PacketsMutex;
-            theirId = call.user0;
-
-            call.user1LastActivity = Date.now();
-        } else if (userId === call.user0 && peerParam === call.user1) {
-            call.user0LastActivity = Date.now();
-        } else {
-            writeHttpChunkResponse(res, isHttpChunkB85Req, 'invalid user ID or peer ID');
-            return;
-        }
-
-        if (call.endedAfterEmptyPacket) {
-            writeHttpChunkResponse(res, isHttpChunkB85Req, 'end');
-            return;
-        }
-
-        let endIt = false;
-
-        // relay from client to peer
-        try {
-            let reqBody: Buffer = Buffer.alloc(0);
-            if (isHttpChunkReq
-                && req.headers['content-length'] != null
-                && parseInt(req.headers['content-length']) > 0) {
-                reqBody = await readRequestBodyAsBuffer(req);
-            } else if (isHttpChunkB85Req) {
-                reqBody = Buffer.from(decodeBase85(
-                    textDecoder.decode(await readRequestBodyAsBuffer(req)),
-                    "z85"
-                ));
-            }
-
-            if (reqBody.byteLength > 0) {
-                const release = await myPakcetsMutex.acquire();
-                myPackets.push(insecureDecrypt(reqBody, callKey));
-                release();
-            }
-        } catch (error) {
-            console.error(`Failed to write packet in http-chunk (${userId} -> ${theirId}):`, error);
-        }
-
-        if (url.searchParams.get('end') === '1') {
-            endIt = true;
-            const release = await myPakcetsMutex.acquire();
-            myPackets.push(Buffer.alloc(0))
-            release();
-        }
-
-        // relay from peer to client
-        let peerData: Buffer = Buffer.alloc(0);
-        let release: MutexInterface.Releaser | null = null;
-        try {
-            release = await theirPakcetsMutex.acquire();
-            if (theirPackets.length > 0 || call.endedAfterEmptyPacket) {
-                if (call.endedAfterEmptyPacket) {
-                    endIt = true;
-                } else {
-                    for (let i = 0; i < theirPackets.length; i++) {
-                        const packet = theirPackets[i];
-                        if (packet.byteLength < 1) {
-                            // Empty packet means end of call
-                            endIt = true;
-                            call.endedAfterEmptyPacket = true;
-                            break;
-                        }
-                        peerData = Buffer.concat([peerData, packet]);
-                    }
+            for (let i = 0; i < currentCalls.length; i++) {
+                const call = currentCalls[i];
+                let foundUser = false;
+                if (call.user0 === userId) {
+                    foundUser = true;
+                    const release = await call.user0PacketsMutex.acquire();
+                    call.user0Packets.push(Buffer.alloc(0));
+                    release();
                 }
-                theirPackets.length = 0;
+                if (call.user1 === userId) {
+                    foundUser = true;
+                    const release = await call.user1PacketsMutex.acquire();
+                    call.user1Packets.push(Buffer.alloc(0));
+                    release();
+                }
+
+                if (!foundUser) {
+                    continue;
+                }
+                currentCalls.splice(i, 1);
+                i--;
             }
-            release()
-        } catch (error) {
-            endIt = true;
-            if (release !== null) {
-                try {
-                    release()
-                } catch { }
-            }
-            console.error(
-                `Failed to receive packet in http-chunk (${userId} <- ${theirId}):`,
-                error
+            release();
+
+            return;
+        }
+
+        // Handle dummy
+        if (method === 'dummy') {
+            const length = 10 + Math.floor(Math.random() * 991);
+            res.writeHead(
+                200,
+                {
+                    'Content-Type': 'text/plain',
+                    'Content-Length': length
+                }
             );
-        }
-        if (peerData.byteLength > 0) {
-            peerData = insecureEncrypt(peerData, callKey);
-        }
-
-        if (endIt) {
-            await removeCall(userId, theirId);
+            res.end(generateRandomAnsiString(length));
+            return;
         }
 
-        writeHttpChunkResponse(
-            res,
-            isHttpChunkB85Req,
-            endIt ? 'end' : 'ok',
-            peerData
-        );
-        return;
+        // Handle whos-calling
+        if (method === 'whos-calling') {
+            const authParam = url.searchParams.get('cred');
+            if (authParam == null) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ authResult: 'no auth param' }));
+                return;
+            }
+
+            const { authResult, userId } = await authenticate(authParam)
+            if (authResult !== "ok") {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ authResult: authResult }));
+                return;
+            }
+
+            // Clean up old calls
+            await userService.cleanupOldCalls(userId);
+
+            // Get incoming calls
+            const incomingCalls = await userService.getIncomingCalls(userId);
+            const sixtySecondsAgo = Date.now() - 60000;
+
+            // Only the calls that are not older than 60 seconds and not answered
+            // + remove the answered field.
+            const recentCalls = incomingCalls
+                .filter(call => call.timestamp > sixtySecondsAgo && !call.answered)
+                .map(call => ({
+                    caller: call.caller,
+                    timestamp: call.timestamp,
+                }));
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                authResult: authResult,
+                calls: recentCalls,
+            }));
+            return;
+        }
+
+        // Handle connection-modes
+        if (method === 'connection-modes') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                connectionModes: ['websocket', 'http', 'http-b85']
+            }));
+            return;
+        }
+
+        // Handle call-http and pickup-http
+        const isCallRequest = method === 'call-http';
+        const isPickupRequest = method === 'pickup-http';
+        if (isCallRequest || isPickupRequest) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+
+            const authParam = url.searchParams.get('cred');
+            const peerParam = url.searchParams.get('peer');
+
+            let result: Array<string | Call> | null = null;
+            if (isCallRequest) {
+                makeCall(authParam, peerParam)
+                    .then(v => { result = v; })
+                    .catch(reason => {
+                        console.error('makeCall():', reason);
+                        result = ['no-result'];
+                    });
+                while (result == null) {
+                    res.write('~')
+                    await sleep(CONFIG.CALL_ANSWER_POLL_INTERVAL_MS);
+                }
+            } else {
+                try {
+                    result = await pickup(authParam, peerParam);
+                } catch (error) {
+                    console.error('pickup():', error);
+                    result = ['no-result'];
+                }
+            }
+
+            if (result.length < 1) {
+                res.end(JSON.stringify({
+                    result: 'no-result'
+                }));
+                return;
+            }
+
+            const message = result[0] as string;
+            res.end(JSON.stringify({
+                result: message
+            }));
+
+            if (!message.startsWith("call-start#")) {
+                return;
+            }
+
+            let call = result[1] as Call;
+            let userId = result[3] as string;
+            while (true) {
+                await sleep(10_000);
+                if (call.endedAfterEmptyPacket) {
+                    break;
+                }
+
+                const release = await currentCallsMutex.acquire();
+                if (currentCalls.filter(
+                    (v, idx, arr) => v.id === call.id
+                ).length < 1) {
+                    release();
+                    break;
+                }
+                release();
+
+                if (call.user0 === userId && Date.now() - call.user0LastActivity > 30_000) {
+                    const release = await call.user0PacketsMutex.acquire();
+                    call.user0Packets.push(Buffer.alloc(0));
+                    release();
+                    break;
+                } else if (call.user1 === userId && Date.now() - call.user1LastActivity > 30_000) {
+                    const release = await call.user1PacketsMutex.acquire();
+                    call.user1Packets.push(Buffer.alloc(0));
+                    release();
+                    break;
+                }
+            }
+            return;
+        }
+
+        // Handle http-chunk and http-chunk-b85
+        const isHttpChunkReq = method === 'http-chunk';
+        const isHttpChunkB85Req = method === 'http-chunk-b85';
+        if (isHttpChunkReq || isHttpChunkB85Req) {
+            const authParam = url.searchParams.get('cred');
+            const peerParam = url.searchParams.get('peer');
+            const callIdParam = url.searchParams.get('call-id');
+
+            if (authParam == null || peerParam == null || callIdParam == null) {
+                writeHttpChunkResponse(res, isHttpChunkB85Req, 'missing parameters');
+                return;
+            }
+
+            const { authResult, userId } = await authenticate(authParam)
+            if (authResult !== "ok") {
+                writeHttpChunkResponse(res, isHttpChunkB85Req, authResult);
+                return;
+            }
+
+            let callId: number;
+            try {
+                callId = parseInt(callIdParam);
+            } catch (error) {
+                writeHttpChunkResponse(res, isHttpChunkB85Req, 'call-id must be a valid integer');
+                return;
+            }
+
+            const release2 = await currentCallsMutex.acquire();
+            const matchedCalls = currentCalls.filter(c => c.id === callId);
+            release2();
+            if (matchedCalls.length < 1) {
+                writeHttpChunkResponse(res, isHttpChunkB85Req, 'end');
+                return;
+            }
+            if (matchedCalls.length > 1) {
+                writeHttpChunkResponse(res, isHttpChunkB85Req, 'duplicated call ID');
+                return;
+            }
+            const call = matchedCalls[0];
+
+            // Make references to our and the other sides' packet array and mutex
+            let callKey = call.user0Key;
+            let myPackets = call.user0Packets;
+            let myPakcetsMutex = call.user0PacketsMutex;
+            let theirPackets = call.user1Packets;
+            let theirPakcetsMutex = call.user1PacketsMutex;
+            let theirId = call.user1;
+            if (userId === call.user1 && peerParam === call.user0) {
+                callKey = call.user1Key;
+                myPackets = call.user1Packets;
+                myPakcetsMutex = call.user1PacketsMutex;
+                theirPackets = call.user0Packets;
+                theirPakcetsMutex = call.user0PacketsMutex;
+                theirId = call.user0;
+
+                call.user1LastActivity = Date.now();
+            } else if (userId === call.user0 && peerParam === call.user1) {
+                call.user0LastActivity = Date.now();
+            } else {
+                writeHttpChunkResponse(res, isHttpChunkB85Req, 'invalid user ID or peer ID');
+                return;
+            }
+
+            if (call.endedAfterEmptyPacket) {
+                writeHttpChunkResponse(res, isHttpChunkB85Req, 'end');
+                return;
+            }
+
+            let endIt = false;
+
+            // relay from client to peer
+            try {
+                let reqBody: Buffer = Buffer.alloc(0);
+                if (isHttpChunkReq
+                    && req.headers['content-length'] != null
+                    && parseInt(req.headers['content-length']) > 0) {
+                    reqBody = await readRequestBodyAsBuffer(req);
+                } else if (isHttpChunkB85Req) {
+                    reqBody = Buffer.from(decodeBase85(
+                        textDecoder.decode(await readRequestBodyAsBuffer(req)),
+                        "z85"
+                    ));
+                }
+
+                if (reqBody.byteLength > 0) {
+                    const release = await myPakcetsMutex.acquire();
+                    myPackets.push(insecureDecrypt(reqBody, callKey));
+                    release();
+                }
+            } catch (error) {
+                console.error(`Failed to write packet in http-chunk (${userId} -> ${theirId}):`, error);
+            }
+
+            if (url.searchParams.get('end') === '1') {
+                endIt = true;
+                const release = await myPakcetsMutex.acquire();
+                myPackets.push(Buffer.alloc(0))
+                release();
+            }
+
+            // relay from peer to client
+            let peerData: Buffer = Buffer.alloc(0);
+            let release: MutexInterface.Releaser | null = null;
+            try {
+                release = await theirPakcetsMutex.acquire();
+                if (theirPackets.length > 0 || call.endedAfterEmptyPacket) {
+                    if (call.endedAfterEmptyPacket) {
+                        endIt = true;
+                    } else {
+                        for (let i = 0; i < theirPackets.length; i++) {
+                            const packet = theirPackets[i];
+                            if (packet.byteLength < 1) {
+                                // Empty packet means end of call
+                                endIt = true;
+                                call.endedAfterEmptyPacket = true;
+                                break;
+                            }
+                            peerData = Buffer.concat([peerData, packet]);
+                        }
+                    }
+                    theirPackets.length = 0;
+                }
+                release()
+            } catch (error) {
+                endIt = true;
+                if (release !== null) {
+                    try {
+                        release()
+                    } catch { }
+                }
+                console.error(
+                    `Failed to receive packet in http-chunk (${userId} <- ${theirId}):`,
+                    error
+                );
+            }
+            if (peerData.byteLength > 0) {
+                peerData = insecureEncrypt(peerData, callKey);
+            }
+
+            if (endIt) {
+                await removeCall(userId, theirId);
+            }
+
+            writeHttpChunkResponse(
+                res,
+                isHttpChunkB85Req,
+                endIt ? 'end' : 'ok',
+                peerData
+            );
+            return;
+        }
+
+        // Default: serve HTML page
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(defaultHtml);
+    } catch (error) {
+        console.error(`handleRequest (URL: ${req.url}) failed:`, error);
     }
-
-    // Default: serve HTML page
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(defaultHtml);
 }
 
 function writeHttpChunkResponse(
