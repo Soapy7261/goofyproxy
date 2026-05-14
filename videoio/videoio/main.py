@@ -95,7 +95,7 @@ def run(args: argparse.Namespace):
     elif args.command == "client":
         GoofyClient(
             gio,
-            host="0.0.0.0",
+            host=args.host,
             port=args.port,
             max_relay_size=goofycommon.parse_data_size(
                 args.max_relay_size
@@ -270,6 +270,14 @@ def main():
             "(example: 25,100)"
         )
 
+    default = "127.0.0.1"
+    parser_client.add_argument(
+        "-z",
+        "--host",
+        type=str,
+        default=default,
+        help=f"[{default=}] local SOCKS5 proxy server host"
+    )
     parser_client.add_argument(
         "-p",
         "--port",
