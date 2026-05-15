@@ -1,4 +1,4 @@
-from .goofyio import GoofyIo
+from .goofyio import GoofyIo, SocketIo, StorageBasedGoofyIo, TxtFileIo
 from .goofy_server import GoofyServer
 from .goofy_client import GoofyClient
 from .address_filter import ADDRESS_FILTER_HELP, ADDRESS_FILTER_LAN, \
@@ -10,6 +10,9 @@ from .common import GOOFY_VERSION, GOOFY_MIN_SERVER_VERSION, \
 
 __all__ = [
     "GoofyIo",
+    "SocketIo",
+    "StorageBasedGoofyIo",
+    "TxtFileIo",
     "GoofyServer",
     "GoofyClient",
     "ADDRESS_FILTER_HELP",

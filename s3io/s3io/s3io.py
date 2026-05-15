@@ -1,19 +1,13 @@
 """
-provides `S3Io`, a `GoofyIo` subclass that creates and reads files on an AWS S3
-"Bucket" to send and receive binary data.
+provides `S3Io`, a `StorageBasedGoofyIo` that creates and reads files on an AWS
+S3 "Bucket" to send and receive binary data.
 """
 
 import io
-import time
-from datetime import datetime, timezone
-import threading
 import logging
-import gzip
-from typing import NamedTuple
 
 import boto3
-from threadpool import *
-from goofyproxy import GoofyIo
+from goofyproxy import StorageBasedGoofyIo
 from goofyproxy.common import *
 
 
@@ -21,15 +15,10 @@ MAX_FILE_AGE: float = 29.5
 "delete s3io files older than this many seconds."
 
 
-class InPacket(NamedTuple):
-    idx: int
-    data: bytes
-
-
-class S3Io(GoofyIo):
+class S3Io(StorageBasedGoofyIo):
     """
-    a `GoofyIo` that creates and reads files on an AWS S3 "Bucket" to send and
-    receive binary data.
+    a `StorageBasedGoofyIo` that creates and reads files on an AWS S3 "Bucket"
+    to send and receive binary data.
 
     Args:
         endpoint_url (str):
@@ -62,34 +51,13 @@ class S3Io(GoofyIo):
             logging level (e.g. `logging.INFO`)
     """
 
-    _log: logging.Logger
-
     endpoint_url: str
     access_key: str
     secret_key: str
     bucket_name: str
-    id: str
-    peer_id: str
-    max_out_size: int
-    interval: float
 
-    _last_out_time: float = 0.
-    _out_idx: int = 0
-    _out_buf: bytearray
-    _out_buf_lock: threading.Lock
-
-    _last_in_time: float = 0.
-    _in_packets: list[InPacket]
-    _in_packets_lock: threading.Lock
-
-    _in_idx: int = 0
-    _in_buf: bytearray
-    _in_buf_lock: threading.Lock
-
+    _log: logging.Logger
     _bucket: object
-
-    _thread: threading.Thread | None = None
-    _stopping: bool = False
 
     def __init__(
         self,
@@ -103,9 +71,6 @@ class S3Io(GoofyIo):
         interval: float = .2,
         log_level: int | None = None
     ):
-        validate_id(id)
-        validate_id(peer_id)
-
         self._log = make_logger(f"s3io", log_level)
         self._log.warning(
             "[IMPORTANT NOTICE] your system clock must be accurate to the "
@@ -116,17 +81,6 @@ class S3Io(GoofyIo):
         self.access_key = access_key
         self.secret_key = secret_key
         self.bucket_name = bucket_name
-        self.id = id
-        self.peer_id = peer_id
-        self.max_out_size = int(max_out_size)
-        self.interval = float(interval)
-
-        self._out_buf = bytearray()
-        self._out_buf_lock = threading.Lock()
-        self._in_packets = []
-        self._in_packets_lock = threading.Lock()
-        self._in_buf = bytearray()
-        self._in_buf_lock = threading.Lock()
 
         # initialize S3 bucket
         s3_resource = boto3.resource(
@@ -137,313 +91,81 @@ class S3Io(GoofyIo):
         )
         self._bucket = s3_resource.Bucket(self.bucket_name)
 
-        # clean up old s3io files
-        to_be_deleted: list[str] = []
-        for obj in self._bucket.objects.all():
-            elapsed_sec = (
-                datetime.now(timezone.utc) - obj.last_modified
-            ).total_seconds()
-            if str(obj.key).startswith("s3io#") and elapsed_sec > MAX_FILE_AGE:
-                to_be_deleted.append(obj.key)
-        self._bucket.delete_objects(
-            Delete={
-                "Objects": list(
-                    [{"Key": key} for key in to_be_deleted]
-                ),
-                "Quiet": True
-            },
-            RequestPayer="requester",
-            BypassGovernanceRetention=False
+        # initialize super
+        super().__init__(
+            id,
+            peer_id,
+            max_out_size,
+            interval,
+            MAX_FILE_AGE,
+            self._log
         )
-        self._log.info(f"deleted {len(to_be_deleted)} old s3io files.")
 
-        # start the background thread for sending outgoing files and receiving
-        # incoming files.
-        self._thread = threading.Thread(
-            name="s3io thread",
-            target=self._thread_run,
-            daemon=True
-        )
-        self._thread.start()
+    def _name(self) -> str:
+        return "s3io"
 
-    def __del__(self):
-        self.stop()
+    def _format_path(
+        self,
+        sender_id: str,
+        peer_id: str,
+        packet_idx: int
+    ) -> str:
+        return f"s3io#{sender_id}#{peer_id}#{packet_idx}"
 
-    def running(self) -> bool:
-        return not self._stopping
-
-    def stop(self):
-        global keyboard_interrupt
-        if self._stopping:
-            return
-        self._stopping = True
-
-    def _receive(self, size: int) -> bytes:
-        if self._last_in_time < .01:
-            self._last_in_time = time.time()
-
-        while True:
-            if not self.running():
-                raise ConnectionError("s3io has stopped.")
-
-            if time.time() - self._last_in_time > MAX_FILE_AGE:
-                raise TimeoutError(
-                    f"s3io received no packets in over {MAX_FILE_AGE=} seconds."
-                )
-
-            poll_interval = .02
-
-            if not self._in_buf_lock.acquire():
-                time.sleep(poll_interval)
-                continue
-
-            if len(self._in_buf) < size:
-                self._in_buf_lock.release()
-                time.sleep(poll_interval)
-                continue
-
-            data = bytes(self._in_buf[:size])
-            self._in_buf = self._in_buf[size:]
-            self._in_buf_lock.release()
-
-            return data
-
-    def _send(self, data: bytes):
-        if not self.running():
-            raise ConnectionError("s3io has stopped.")
-
-        force_acquire(self._out_buf_lock)
-        self._out_buf += data
-        self._out_buf_lock.release()
-
-    def _thread_run(self):
-        global keyboard_interrupt
+    def _unformat_path(self, path: str) -> tuple[str, str, int] | None:
         try:
-            while not self._stopping:
-                time_start = time.time()
-
-                send_future = ThreadPool.enqueue(
-                    self._send_packet_if_needed
-                )
-                receive_future = ThreadPool.enqueue(
-                    self._receive_new_packets
-                )
-                send_future.get()
-                receive_future.get()
-
-                remaining_time = time_start + self.interval - time.time()
-                if remaining_time > 0.:
-                    time.sleep(remaining_time)
-        except KeyboardInterrupt as e:
-            keyboard_interrupt = e
-        except BaseException as e:
-            if not self._stopping:
-                self._log.fatal(format_exception(e))
-        finally:
-            self.stop()
-
-    def _compress_out_data_if_worth_it(self) -> tuple[bytes, bool]:
-        force_acquire(self._out_buf_lock)
-
-        orig_size = self.max_out_size
-        data = bytes(self._out_buf[:orig_size])
-        is_compressed: bool = False
-
-        for ratio in [3, 2, 1.5, 1]:
-            temp_orig_size = min(
-                int(self.max_out_size * ratio),
-                len(self._out_buf)
-            )
-            temp = gzip.compress(self._out_buf[:temp_orig_size])
-            if len(temp) < min(temp_orig_size, self.max_out_size):
-                orig_size = temp_orig_size
-                data = temp
-                is_compressed = True
-                break
-
-        self._out_buf = self._out_buf[orig_size:]
-        self._out_buf_lock.release()
-
-        return data, is_compressed
-
-    def _send_packet_if_needed(self):
-        if self._stopping:
-            return
-
-        data, is_compressed = self._compress_out_data_if_worth_it()
-
-        elapsed_since_last_packet = time.time() - self._last_out_time
-        if not data and elapsed_since_last_packet < MAX_FILE_AGE / 3.:
-            return
-        elif not data:
-            # too much time passed with no outgoing packets, so we send an empty
-            # packet to say we're alive.
-            data = b""
-
-        self._last_out_time = time.time()
-
-        if data and is_compressed:
-            data = b"C" + data
-        elif data:
-            data = b"c" + data
-
-        path = f"s3io#{self.id}#{self.peer_id}#{self._out_idx}"
-        self._out_idx += 1
-
-        try:
-            self._bucket.put_object(
-                Key=path,
-                Body=data,
-                ACL='private'
-            )
-        except Exception as e:
-            raise ConnectionError(
-                f"s3io failed to upload file \"{path}\": {format_exception(e)}"
-            )
-
-    def _receive_new_packets(self):
-        if self._stopping:
-            return
-
-        to_be_deleted: list[str] = []
-
-        # check new files
-        for obj in self._bucket.objects.all():
-            path = str(obj.key)
             if not path.startswith("s3io#"):
-                continue
-
-            # delete old s3io files
-            elapsed_sec = (
-                datetime.now(timezone.utc) - obj.last_modified
-            ).total_seconds()
-            if elapsed_sec > MAX_FILE_AGE:
-                to_be_deleted.append(path)
-                continue
-
-            # extract sender, receiver, and packet index
+                return None
 
             parts = path.split("#")
             if len(parts) < 4:
-                continue
+                return None
 
             sender = parts[1]
             receiver = parts[2]
-            try:
-                packet_idx = int(parts[3])
-            except Exception:
+            packet_idx = int(parts[3])
+            return sender, receiver, packet_idx
+        except Exception:
+            return None
+
+    def _list_files(self) -> list[StorageBasedGoofyIo.File]:
+        files: list[StorageBasedGoofyIo.File] = []
+        for obj in self._bucket.objects.all():
+            if not str(obj.key).startswith("s3io#"):
                 continue
+            files.append(StorageBasedGoofyIo.File(
+                obj.key,
+                obj.last_modified.timestamp()
+            ))
+        return files
 
-            # skip if the packet isn't sent from the peer to us
-            if sender != self.peer_id or receiver != self.id:
-                continue
+    def _download_files(self, files: list[StorageBasedGoofyIo.File]):
+        for file in files:
+            bytes_io = io.BytesIO()
+            self._bucket.download_fileobj(file.path, bytes_io)
+            bytes_io.seek(0)
+            file.data = bytes_io.getvalue()
 
-            # ignore and delete packets we've already read
-            if packet_idx < self._in_idx:
-                to_be_deleted.append(path)
-                continue
+    def _upload_files(self, files: list[StorageBasedGoofyIo.File]):
+        for file in files:
+            if file.data is None:
+                raise ValueError(
+                    f"cannot upload file \"{file.path}\" with no data"
+                )
+            self._bucket.put_object(
+                Key=file.path,
+                Body=file.data,
+                ACL='private'
+            )
 
-            # skip if the packet index is too far ahead. for the first 4
-            # packets, it must be identical to _in_idx, after that it must be
-            # 16 or less indices ahead of _in_idx.
-            if (self._in_idx < 4 and packet_idx != self._in_idx) or \
-                    (packet_idx - self._in_idx > 16):
-                continue
-
-            # download the file
-            try:
-                bytes_io = io.BytesIO()
-                self._bucket.download_fileobj(path, bytes_io)
-                bytes_io.seek(0)
-                data = bytes_io.getvalue()
-            except Exception as e:
-                if not self._stopping:
-                    self._log.warning(
-                        f"failed to download {path}: {format_exception(e)}"
-                    )
-                continue
-
-            # successful read, can be safely deleted now
-            to_be_deleted.append(path)
-
-            # update the last incoming packet receive time
-            self._last_in_time = time.time()
-
-            # decompress if needed
-            if data and data[0] == ord('C'):
-                data = gzip.decompress(data[1:])
-            elif data and data[0] == ord('c'):
-                data = data[1:]
-
-            # add to incoming packets (remove older ones with the same index)
-            force_acquire(self._in_packets_lock)
-            for i in range(len(self._in_packets)):
-                packet = self._in_packets[i]
-                if packet.idx == packet_idx:
-                    self._in_packets.pop(i)
-                    i -= 1
-            self._in_packets.append(InPacket(packet_idx, data))
-            self._in_packets_lock.release()
-
-        # delete old or invalid files
+    def _delete_files(self, paths: list[str]):
         self._bucket.delete_objects(
             Delete={
                 "Objects": list(
-                    [{"Key": key} for key in to_be_deleted]
+                    [{"Key": path} for path in paths]
                 ),
                 "Quiet": True
             },
             RequestPayer="requester",
             BypassGovernanceRetention=False
-        )
-
-        # sort incoming packets and add data to the input buffer
-
-        force_acquire(self._in_packets_lock)
-
-        self._in_packets = list(filter(
-            lambda p: p.idx >= self._in_idx,
-            self._in_packets
-        ))
-        self._in_packets.sort(key=lambda p: p.idx)
-
-        if not self._in_packets:
-            self._in_packets_lock.release()
-            return
-
-        force_acquire(self._in_buf_lock)
-        while self._in_packets \
-                and self._in_packets[0].idx == self._in_idx:
-            self._in_idx += 1
-            self._in_buf += self._in_packets[0].data
-            self._in_packets = self._in_packets[1:]
-        self._in_buf_lock.release()
-
-        self._in_packets_lock.release()
-
-
-ID_VALID_CHARS = \
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-
-
-def validate_id(id: str):
-    try:
-        if not isinstance(id, str):
-            raise Exception(
-                f"must be a string, not {type(id)}"
-            )
-        if not id:
-            raise Exception("cannot be empty")
-        if len(id) > 64:
-            raise ValueError("cannot contain more than 64 characters")
-        for c in id:
-            if c not in ID_VALID_CHARS:
-                raise Exception(
-                    "can only contain Latin letters, digits, '-', and '_'"
-                )
-        if id[0] in "-_" or id[-1] in "-_":
-            raise Exception("cannot start or end with '-' or '_'")
-    except Exception as e:
-        raise ValueError(
-            f"invalid user ID \"{id}\": {e}"
         )

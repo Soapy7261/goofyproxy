@@ -2,11 +2,19 @@
 an abstraction for data transfer through goofy ahh channels.
 """
 
+import io
+import time
 import socket
-
-import base64
-import gzip
+from typing import NamedTuple
 from pathlib import Path
+from dataclasses import dataclass
+import threading
+import logging
+import gzip
+import base64
+
+from .common import *
+from .threadpool import ThreadPool
 
 
 class GoofyIo:
@@ -92,6 +100,462 @@ class SocketIo(GoofyIo):
 
     def _send(self, data: bytes):
         self.sock.sendall(data)
+
+
+class StorageBasedGoofyIo(GoofyIo):
+    """
+    base class for `GoofyIo`s that use a file storage system for data transfer
+    (creating and reading files for sending and receiving), whether local or on
+    the cloud. subclasses must implement abstract functions `_name`,
+    `_format_path`, `_unformat_path`, `_list_files`, `_download_files`,
+    `_upload_files`, and `_delete_files`.
+
+    NOTE: the two peers and the storage system must perfectly synchronize their
+    clocks with each other.
+
+    Args:
+        id (str):
+            sender ID to include in outgoing files so the other side knows who
+            sent it.
+
+        peer_id (str):
+            sender ID of the peer. any incoming file with a different sender ID
+            will be ignored.
+
+        max_out_size (int):
+            maximum outgoing file size in bytes.
+
+        interval (float):
+            send-receive loop interval in seconds.
+
+        max_file_age (float):
+            files older than this many seconds will be deleted. prefer using
+            identical values for the sender and receiver.
+
+        log (logging.Logger):
+            logger
+    """
+
+    class InPacket(NamedTuple):
+        idx: int
+        data: bytes
+
+    @dataclass
+    class File:
+        path: str
+        "file path"
+
+        time: float
+        "creation timestamp in Unix epoch format"
+
+        data: bytes | None = None
+        "binary content of the file (optional)"
+
+    id: str
+    peer_id: str
+    max_out_size: int
+    interval: float
+    max_file_age: float
+    log: logging.Logger
+
+    _last_out_time: float = 0.
+    _out_idx: int = 0
+    _out_buf: bytearray
+    _out_buf_lock: threading.Lock
+
+    _last_in_time: float = 0.
+    _in_packets: list[InPacket]
+    _in_packets_lock: threading.Lock
+
+    _in_idx: int = 0
+    _in_buf: bytearray
+    _in_buf_lock: threading.Lock
+
+    _thread: threading.Thread | None = None
+    _stopping: bool = False
+
+    def _name(self) -> str:
+        """
+        abstract function returning the name of the method used for data
+        transfer or the name of the subclass. example: "TxtFileIo".
+        """
+        raise NotImplementedError()
+
+    def _format_path(
+        self,
+        sender_id: str,
+        peer_id: str,
+        packet_idx: int
+    ) -> str:
+        """
+        abstract function returning a file path based on sender ID,
+        peer/receiver ID, and packet index.
+        """
+        raise NotImplementedError()
+
+    def _unformat_path(self, path: str) -> tuple[str, str, int] | None:
+        """
+        abstract function that parses a file path and returns a tuple containing
+        the sender ID, peer/receiver ID, and packet index. if parsing fails, it
+        must return `None` and not raise any exceptions.
+        """
+        raise NotImplementedError()
+
+    def _list_files(self) -> list[StorageBasedGoofyIo.File]:
+        """
+        abstract function returning the list of all files in the storage used
+        for data transfer, regardless of the sender and receiver ID. avoid
+        including unrelated files not used by `StorageBasedGoofyIo`.
+
+        Returns:
+            a list of `StorageBasedGoofyIo.File` objects with values for the
+            `path` and `time` fields, but not `data` (file contents should not
+            be downloaded).
+        """
+        raise NotImplementedError()
+
+    def _download_files(self, files: list[StorageBasedGoofyIo.File]):
+        """
+        abstract function which sets the `data` field in-place for given files
+        by downloading them. if the `data` field is already set, it is optional
+        to re-download.
+
+        Args:
+            files (list[StorageBasedGoofyIo.File]):
+                list of `StorageBasedGoofyIo.File` objects whose `data` fields
+                should be retreived.
+        """
+        raise NotImplementedError()
+
+    def _upload_files(self, files: list[StorageBasedGoofyIo.File]):
+        """
+        abstract function for uploading new files to the storage. if the `data`
+        field is set to `None` for any of the files, a `ValueError` must be
+        raised. the `time` field must be discarded. the implementation must
+        instead use the current timestamp or rely on the storage system for
+        generating timestamps.
+
+        Args:
+            files (list[StorageBasedGoofyIo.File]):
+                list of files to upload to the storage.
+        """
+        raise NotImplementedError()
+
+    def _delete_files(self, paths: list[str]):
+        """
+        abstract function for deleting files with given paths from the storage.
+        if any path is not found on the storage, it must be discarded silently
+        without raising an exception.
+
+        Args:
+            files (list[str]):
+                list of paths for files to delete from the storage.
+        """
+        raise NotImplementedError()
+
+    def __init__(
+        self,
+        id: str,
+        peer_id: str,
+        max_out_size: int = 200 * 1024,
+        interval: float = .2,
+        max_file_age: float = 29.5,
+        log: logging.Logger | None = None
+    ):
+        self._validate_id(id)
+        self._validate_id(peer_id)
+
+        self.id = id
+        self.peer_id = peer_id
+        self.max_out_size = int(max_out_size)
+        self.interval = float(interval)
+        self.max_file_age = float(max_file_age)
+        if log is None:
+            self.log = make_logger("StorageBasedGoofyIo")
+        else:
+            self.log = log
+
+        self._out_buf = bytearray()
+        self._out_buf_lock = threading.Lock()
+        self._in_packets = []
+        self._in_packets_lock = threading.Lock()
+        self._in_buf = bytearray()
+        self._in_buf_lock = threading.Lock()
+
+        # clean up old files
+        to_be_deleted: list[str] = []
+        for file in self._list_files():
+            if time.time() - file.time > self.max_file_age:
+                to_be_deleted.append(file.path)
+        self._delete_files(to_be_deleted)
+        self.log.info(f"deleted {len(to_be_deleted)} old files.")
+
+        # start the background thread for sending and receiving
+        self._thread = threading.Thread(
+            name=f"{self._name()} thread",
+            target=self._thread_run,
+            daemon=True
+        )
+        self._thread.start()
+
+    def __del__(self):
+        self.stop()
+
+    def running(self) -> bool:
+        return not self._stopping
+
+    def stop(self):
+        global keyboard_interrupt
+        if self._stopping:
+            return
+        self._stopping = True
+
+    def _receive(self, size: int) -> bytes:
+        if self._last_in_time < .01:
+            self._last_in_time = time.time()
+
+        while True:
+            if not self.running():
+                raise ConnectionError(f"{self._name()} has stopped.")
+
+            if time.time() - self._last_in_time > self.max_file_age:
+                raise TimeoutError(
+                    f"{self._name()} received no packets in over "
+                    f"max_file_age={self.max_file_age} seconds."
+                )
+
+            poll_interval = min(.02, self.interval)
+
+            if not self._in_buf_lock.acquire():
+                time.sleep(poll_interval)
+                continue
+
+            if len(self._in_buf) < size:
+                self._in_buf_lock.release()
+                time.sleep(poll_interval)
+                continue
+
+            data = bytes(self._in_buf[:size])
+            self._in_buf = self._in_buf[size:]
+            self._in_buf_lock.release()
+
+            return data
+
+    def _send(self, data: bytes):
+        if not self.running():
+            raise ConnectionError(f"{self._name()} has stopped.")
+
+        force_acquire(self._out_buf_lock)
+        self._out_buf += data
+        self._out_buf_lock.release()
+
+    def _thread_run(self):
+        global keyboard_interrupt
+        try:
+            while not self._stopping:
+                time_start = time.time()
+
+                send_future = ThreadPool.enqueue(
+                    self._send_packet_if_needed
+                )
+                receive_future = ThreadPool.enqueue(
+                    self._receive_new_packets
+                )
+                send_future.get()
+                receive_future.get()
+
+                remaining_time = time_start + self.interval - time.time()
+                if remaining_time > 0.:
+                    time.sleep(remaining_time)
+        except KeyboardInterrupt as e:
+            keyboard_interrupt = e
+        except BaseException as e:
+            if not self._stopping:
+                self.log.fatal(format_exception(e))
+        finally:
+            self.stop()
+
+    def _compress_out_data_if_worth_it(self) -> tuple[bytes, bool]:
+        force_acquire(self._out_buf_lock)
+
+        orig_size = self.max_out_size
+        data = bytes(self._out_buf[:orig_size])
+        is_compressed: bool = False
+
+        for ratio in [3, 2, 1.5, 1]:
+            temp_orig_size = min(
+                int(self.max_out_size * ratio),
+                len(self._out_buf)
+            )
+            temp = gzip.compress(self._out_buf[:temp_orig_size])
+            if len(temp) < min(temp_orig_size, self.max_out_size):
+                orig_size = temp_orig_size
+                data = temp
+                is_compressed = True
+                break
+
+        self._out_buf = self._out_buf[orig_size:]
+        self._out_buf_lock.release()
+
+        return data, is_compressed
+
+    def _send_packet_if_needed(self):
+        if self._stopping:
+            return
+
+        data, is_compressed = self._compress_out_data_if_worth_it()
+
+        elapsed_since_last_packet = time.time() - self._last_out_time
+        if not data and (
+            elapsed_since_last_packet < self.max_file_age / 3.
+            or self._out_idx == 0
+        ):
+            return
+        elif not data:
+            # too much time passed with no outgoing packets, so we send an empty
+            # packet to say we're alive.
+            data = b""
+
+        self._last_out_time = time.time()
+
+        if data and is_compressed:
+            data = b"C" + data
+        elif data:
+            data = b"c" + data
+
+        path = self._format_path(self.id, self.peer_id, self._out_idx)
+        self._out_idx += 1
+
+        try:
+            self._upload_files([
+                StorageBasedGoofyIo.File(path, 0., data)
+            ])
+        except Exception as e:
+            raise ConnectionError(
+                f"{self._name()} failed to upload \"{path}\": "
+                f"{format_exception(e)}"
+            )
+
+    def _receive_new_packets(self):
+        if self._stopping:
+            return
+
+        to_be_deleted: list[str] = []
+
+        # check new files
+        for file in self._list_files():
+            # skip and delete old files
+            if time.time() - file.time > self.max_file_age:
+                to_be_deleted.append(file.path)
+                continue
+
+            # extract sender, receiver, and packet index
+            unformat_result = self._unformat_path(file.path)
+            if unformat_result is None:
+                continue
+            sender, receiver, packet_idx = unformat_result
+
+            # skip if the packet isn't sent from the peer to us
+            if sender != self.peer_id or receiver != self.id:
+                continue
+
+            # ignore and delete packets we've already read
+            if packet_idx < self._in_idx:
+                to_be_deleted.append(file.path)
+                continue
+
+            # skip if the packet index is too far ahead. for the first 4
+            # packets, it must be identical to _in_idx, after that it must be
+            # 16 or less indices ahead of _in_idx.
+            if (self._in_idx < 4 and packet_idx != self._in_idx) or \
+                    (packet_idx - self._in_idx > 16):
+                continue
+
+            # download the file
+            try:
+                self._download_files([file])
+            except Exception as e:
+                if not self._stopping:
+                    self.log.warning(
+                        f"failed to download \"{file.path}\": "
+                        f"{format_exception(e)}"
+                    )
+                continue
+
+            # successful read, can be safely deleted now
+            to_be_deleted.append(file.path)
+
+            # update the last incoming packet receive time
+            self._last_in_time = time.time()
+
+            # decompress if needed
+            if file.data and file.data[0] == ord('C'):
+                file.data = gzip.decompress(file.data[1:])
+            elif file.data and file.data[0] == ord('c'):
+                file.data = file.data[1:]
+
+            # add to incoming packets (remove older ones with the same index)
+            force_acquire(self._in_packets_lock)
+            for i in range(len(self._in_packets)):
+                packet = self._in_packets[i]
+                if packet.idx == packet_idx:
+                    self._in_packets.pop(i)
+                    i -= 1
+            self._in_packets.append(
+                StorageBasedGoofyIo.InPacket(packet_idx, file.data)
+            )
+            self._in_packets_lock.release()
+
+        # delete old or invalid files
+        self._delete_files(to_be_deleted)
+
+        # sort incoming packets and add data to the input buffer
+
+        force_acquire(self._in_packets_lock)
+
+        self._in_packets = list(filter(
+            lambda p: p.idx >= self._in_idx,
+            self._in_packets
+        ))
+        self._in_packets.sort(key=lambda p: p.idx)
+
+        if not self._in_packets:
+            self._in_packets_lock.release()
+            return
+
+        force_acquire(self._in_buf_lock)
+        while self._in_packets \
+                and self._in_packets[0].idx == self._in_idx:
+            self._in_idx += 1
+            self._in_buf += self._in_packets[0].data
+            self._in_packets = self._in_packets[1:]
+        self._in_buf_lock.release()
+
+        self._in_packets_lock.release()
+
+    def _validate_id(self, id: str):
+        ID_VALID_CHARS = \
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        try:
+            if not isinstance(id, str):
+                raise Exception(
+                    f"must be a string, not {type(id)}"
+                )
+            if not id:
+                raise Exception("cannot be empty")
+            if len(id) > 64:
+                raise ValueError("cannot contain more than 64 characters")
+            for c in id:
+                if c not in ID_VALID_CHARS:
+                    raise Exception(
+                        "can only contain Latin letters, digits, '-', and '_'"
+                    )
+            if id[0] in "-_" or id[-1] in "-_":
+                raise Exception("cannot start or end with '-' or '_'")
+        except Exception as e:
+            raise ValueError(
+                f"invalid user ID \"{id}\": {e}"
+            )
 
 
 class TxtFileIo(GoofyIo):
