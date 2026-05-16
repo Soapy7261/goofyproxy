@@ -256,6 +256,93 @@ def decode_float32(b: bytes) -> float:
     return float(struct.unpack('>f', b)[0])
 
 
+# precomputed offsets and capacities for multibyte integer encoding
+_MULTIBYTE_INT_OFFSETS = [0, 64, 16448, 4210752]
+_MULTIBYTE_INT_MAX_VALS = [63, 16447, 4210751, 1077952575]
+
+
+def encode_int_multibyte(v: int) -> bytes:
+    """
+    encode a non-negative integer into 1..4 bytes using a multi-byte scheme.
+    raises `ValueError` if v is negative or too large.
+    """
+    if v < 0:
+        raise ValueError(
+            "only non-negative integers can be multibyte-encoded."
+        )
+    if v <= _MULTIBYTE_INT_MAX_VALS[0]:
+        # 1 byte: prefix 00, 6 value bits
+        return bytes([v])  # bits 7-6 are already 00
+    if v <= _MULTIBYTE_INT_MAX_VALS[1]:
+        # 2 bytes: prefix 01, 14 value bits
+        val = v - _MULTIBYTE_INT_OFFSETS[1]
+        first = 0x40 | (val >> 8)  # 0x40 = 01 << 6
+        return bytes([first, val & 0xFF])
+    if v <= _MULTIBYTE_INT_MAX_VALS[2]:
+        # 3 bytes: prefix 10, 22 value bits
+        val = v - _MULTIBYTE_INT_OFFSETS[2]
+        first = 0x80 | (val >> 16)  # 0x80 = 10 << 6
+        return bytes([first, (val >> 8) & 0xFF, val & 0xFF])
+    if v <= _MULTIBYTE_INT_MAX_VALS[3]:
+        # 4 bytes: prefix 11, 30 value bits
+        val = v - _MULTIBYTE_INT_OFFSETS[3]
+        first = 0xC0 | (val >> 24)  # 0xC0 = 11 << 6
+        return bytes([first, (val >> 16) & 0xFF, (val >> 8) & 0xFF, val & 0xFF])
+    raise ValueError(
+        f"value {v} too large for multibyte integer encoding (max "
+        f"{_MULTIBYTE_INT_MAX_VALS[3]})."
+    )
+
+
+def decode_int_multibyte(
+    data: bytes,
+    offset: int = 0
+) -> tuple[int | None, int, bytes]:
+    """
+    decode an integer from a `bytes` object written by `encode_int_multibyte`.
+    raises `EOFError` if there are not enough bytes.
+
+    Args:
+        data (bytes):
+            `bytes` object from which to decode a multibyte integer.
+
+        offset (int):
+            which byte index to start reading from in `data`.
+
+    Returns:
+        a tuple containing the decoded value (or None if failed), the total
+        number of bytes in the encoded value, and the remaining bytes in `data`
+        after decoding (will be intact if decoding fails).
+    """
+
+    if len(data) - offset < 1:
+        return None, 0, data
+    first_byte = data[offset]
+    offset += 1
+
+    # top 2 bits: 0,1,2,3 -> 1,2,3,4 bytes
+    length_bits = first_byte >> 6
+    length = length_bits + 1
+
+    # read remaining bytes
+    n_extra = length - 1
+    if len(data) - offset < n_extra:
+        return None, 0, data
+    extra = data[offset:offset + n_extra]
+    offset += n_extra
+
+    # extract value stored in the non-prefix bits
+    value_part = first_byte & 0x3F  # lower 6 bits of the first byte
+    for byte in extra:
+        value_part = (value_part << 8) | byte
+
+    # add the base offset for this length
+    value = value_part + _MULTIBYTE_INT_OFFSETS[length - 1]
+
+    # return
+    return value, length, data[offset:]
+
+
 def format_exception(e: Exception) -> str:
     if (isinstance(e, int) or isinstance(e, str) or isinstance(e, bool)
             or isinstance(e, tuple)
