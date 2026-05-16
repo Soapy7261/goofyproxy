@@ -121,11 +121,11 @@ class GhIo(StorageBasedGoofyIo):
 
     def _unformat_path(self, path: str) -> tuple[str, str, int, float] | None:
         try:
-            if not (path.startswith("ghio#") and path.endswith(".png")):
+            if not (path.startswith("ghio ") and path.endswith(".png")):
                 return None
             path = path[:-4]
 
-            parts = path.split("#")
+            parts = path.split(" ")
             if len(parts) < 5:
                 return None
 

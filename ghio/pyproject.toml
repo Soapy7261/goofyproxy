@@ -1,5 +1,5 @@
 [project]
-name = "githubio"
+name = "ghio"
 version = "0.1.0"
 dependencies = [
     "requests>=2.33.1",
