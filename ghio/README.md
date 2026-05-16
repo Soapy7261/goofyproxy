@@ -1,7 +1,7 @@
-# s3io
+# ghio
 
-`S3Io` is a child class of `StorageBasedGoofyIo` that creates and reads files on
-an AWS S3 Bucket for data transfer.
+`GhIo` is a child class of `GoofyIoStorageBasedGoofyIo` that creates and reads
+files on a GitHub repository for data transfer.
 
 The main script (`main.py`) provides a command line program that runs
 [goofyproxy](../goofyproxy) on top of s3io.

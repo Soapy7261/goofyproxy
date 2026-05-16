@@ -2,7 +2,6 @@
 an abstraction for data transfer through goofy ahh channels.
 """
 
-import io
 import time
 import socket
 from typing import NamedTuple
@@ -110,8 +109,7 @@ class StorageBasedGoofyIo(GoofyIo):
     `_format_path`, `_unformat_path`, `_list_files`, `_download_files`,
     `_upload_files`, and `_delete_files`.
 
-    NOTE: the two peers and the storage system must perfectly synchronize their
-    clocks with each other.
+    NOTE: the two peers must use synchronized clocks.
 
     Args:
         id (str):
@@ -144,9 +142,6 @@ class StorageBasedGoofyIo(GoofyIo):
     class File:
         path: str
         "file path"
-
-        time: float
-        "creation timestamp in Unix epoch format"
 
         data: bytes | None = None
         "binary content of the file (optional)"
@@ -185,19 +180,20 @@ class StorageBasedGoofyIo(GoofyIo):
         self,
         sender_id: str,
         peer_id: str,
-        packet_idx: int
+        packet_idx: int,
+        timestamp: float
     ) -> str:
         """
-        abstract function returning a file path based on sender ID,
-        peer/receiver ID, and packet index.
+        abstract function for constructing a file path string based on given
+        sender ID, peer/receiver ID, packet index, and timestamp.
         """
         raise NotImplementedError()
 
-    def _unformat_path(self, path: str) -> tuple[str, str, int] | None:
+    def _unformat_path(self, path: str) -> tuple[str, str, int, float] | None:
         """
         abstract function that parses a file path and returns a tuple containing
-        the sender ID, peer/receiver ID, and packet index. if parsing fails, it
-        must return `None` and not raise any exceptions.
+        the sender ID, peer/receiver ID, packet index, and timestamp. if parsing
+        fails, it must return `None` and not raise any exceptions.
         """
         raise NotImplementedError()
 
@@ -209,8 +205,8 @@ class StorageBasedGoofyIo(GoofyIo):
 
         Returns:
             a list of `StorageBasedGoofyIo.File` objects with values for the
-            `path` and `time` fields, but not `data` (file contents should not
-            be downloaded).
+            `path` field, but not `data` (file contents should not be be
+            downloaded).
         """
         raise NotImplementedError()
 
@@ -231,9 +227,7 @@ class StorageBasedGoofyIo(GoofyIo):
         """
         abstract function for uploading new files to the storage. if the `data`
         field is set to `None` for any of the files, a `ValueError` must be
-        raised. the `time` field must be discarded. the implementation must
-        instead use the current timestamp or rely on the storage system for
-        generating timestamps.
+        raised.
 
         Args:
             files (list[StorageBasedGoofyIo.File]):
@@ -285,7 +279,11 @@ class StorageBasedGoofyIo(GoofyIo):
         # clean up old files
         to_be_deleted: list[str] = []
         for file in self._list_files():
-            if time.time() - file.time > self.max_file_age:
+            unformat_result = self._unformat_path(file.path)
+            if unformat_result is None:
+                continue
+            _, _, _, timestamp = unformat_result
+            if time.time() - timestamp > self.max_file_age:
                 to_be_deleted.append(file.path)
         self._delete_files(to_be_deleted)
         self.log.info(f"deleted {len(to_be_deleted)} old files.")
@@ -423,12 +421,17 @@ class StorageBasedGoofyIo(GoofyIo):
         elif data:
             data = b"c" + data
 
-        path = self._format_path(self.id, self.peer_id, self._out_idx)
+        path = self._format_path(
+            self.id,
+            self.peer_id,
+            self._out_idx,
+            time.time()
+        )
         self._out_idx += 1
 
         try:
             self._upload_files([
-                StorageBasedGoofyIo.File(path, 0., data)
+                StorageBasedGoofyIo.File(path, data)
             ])
         except Exception as e:
             raise ConnectionError(
@@ -444,16 +447,16 @@ class StorageBasedGoofyIo(GoofyIo):
 
         # check new files
         for file in self._list_files():
-            # skip and delete old files
-            if time.time() - file.time > self.max_file_age:
-                to_be_deleted.append(file.path)
-                continue
-
-            # extract sender, receiver, and packet index
+            # extract sender, receiver, packet index, and timestamp
             unformat_result = self._unformat_path(file.path)
             if unformat_result is None:
                 continue
-            sender, receiver, packet_idx = unformat_result
+            sender, receiver, packet_idx, timestamp = unformat_result
+
+            # skip and delete old files
+            if time.time() - timestamp > self.max_file_age:
+                to_be_deleted.append(file.path)
+                continue
 
             # skip if the packet isn't sent from the peer to us
             if sender != self.peer_id or receiver != self.id:

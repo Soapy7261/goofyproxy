@@ -108,23 +108,25 @@ class S3Io(StorageBasedGoofyIo):
         self,
         sender_id: str,
         peer_id: str,
-        packet_idx: int
+        packet_idx: int,
+        timestamp: float
     ) -> str:
-        return f"s3io#{sender_id}#{peer_id}#{packet_idx}"
+        return f"s3io#{sender_id}#{peer_id}#{packet_idx}#{timestamp:.4f}"
 
-    def _unformat_path(self, path: str) -> tuple[str, str, int] | None:
+    def _unformat_path(self, path: str) -> tuple[str, str, int, float] | None:
         try:
             if not path.startswith("s3io#"):
                 return None
 
             parts = path.split("#")
-            if len(parts) < 4:
+            if len(parts) < 5:
                 return None
 
             sender = parts[1]
             receiver = parts[2]
             packet_idx = int(parts[3])
-            return sender, receiver, packet_idx
+            timestamp = float(parts[4])
+            return sender, receiver, packet_idx, timestamp
         except Exception:
             return None
 
@@ -133,10 +135,7 @@ class S3Io(StorageBasedGoofyIo):
         for obj in self._bucket.objects.all():
             if not str(obj.key).startswith("s3io#"):
                 continue
-            files.append(StorageBasedGoofyIo.File(
-                obj.key,
-                obj.last_modified.timestamp()
-            ))
+            files.append(StorageBasedGoofyIo.File(obj.key))
         return files
 
     def _download_files(self, files: list[StorageBasedGoofyIo.File]):

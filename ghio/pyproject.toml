@@ -1,0 +1,7 @@
+[project]
+name = "githubio"
+version = "0.1.0"
+dependencies = [
+    "requests>=2.33.1",
+    "goofyproxy>=0.1.0",
+]
