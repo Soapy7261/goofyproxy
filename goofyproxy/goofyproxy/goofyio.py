@@ -421,6 +421,8 @@ class StorageBasedGoofyIo(GoofyIo):
         elif data:
             data = b"c" + data
 
+        data = encode_int_multibyte(len(data)) + data
+
         path = self._format_path(
             self.id,
             self.peer_id,
@@ -485,6 +487,18 @@ class StorageBasedGoofyIo(GoofyIo):
                     )
                 continue
 
+            # skip if data is None or empty
+            if not file.data:
+                continue
+
+            # read multibyte-encoded length at the beginning
+            data_len, _, data = decode_int_multibyte(file.data)
+
+            # skip if decoding failed or the actual length doesn't match (file
+            # data may be incomplete).
+            if not data_len or data_len != len(data):
+                continue
+
             # successful read, can be safely deleted now
             to_be_deleted.append(file.path)
 
@@ -492,10 +506,10 @@ class StorageBasedGoofyIo(GoofyIo):
             self._last_in_time = time.time()
 
             # decompress if needed
-            if file.data and file.data[0] == ord('C'):
-                file.data = gzip.decompress(file.data[1:])
-            elif file.data and file.data[0] == ord('c'):
-                file.data = file.data[1:]
+            if data and data[0] == ord('C'):
+                data = gzip.decompress(data[1:])
+            elif data and data[0] == ord('c'):
+                data = data[1:]
 
             # add to incoming packets (remove older ones with the same index)
             force_acquire(self._in_packets_lock)
@@ -505,7 +519,7 @@ class StorageBasedGoofyIo(GoofyIo):
                     self._in_packets.pop(i)
                     i -= 1
             self._in_packets.append(
-                StorageBasedGoofyIo.InPacket(packet_idx, file.data)
+                StorageBasedGoofyIo.InPacket(packet_idx, data)
             )
             self._in_packets_lock.release()
 
