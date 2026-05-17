@@ -514,7 +514,7 @@ class GoofyServer:
             target.settimeout(self._timeout)
             try:
                 target.connect(sockaddr)
-            except ConnectionRefusedError:
+            except ConnectionRefusedError as e:
                 close_socket(target)
 
                 self._enqueue_outgoing_packet(GoofyEventSocketStatus(
