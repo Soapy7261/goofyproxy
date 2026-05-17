@@ -9,14 +9,18 @@ weird means of data transfer.
 channel or medium. It has `send()`, `receive()`, and a few simple rules mentioned
 in `goofyio.py`.
 
-goofyproxy only provides two derived classes for `GoofyIo`:
+goofyproxy provides the following subclasses for `GoofyIo` out of the box:
 
-- `SocketIo`: uses pre-connected sockets to send and receive data.
+- `SocketIo`: Uses pre-connected sockets to send and receive data.
 
-- `TxtFileIo`: creates, reads, and deletes .txt files with base85 encoding and
+- `StorageBasedGoofyIo`: A base class for `GoofyIo`s that use a file storage
+system for data transfer (by creating and reading files), whether local or on
+the cloud. It uses packet indices, timestamps, and length metadata to ensure
+correct ordering and avoid reading incomplete files. gzip compression is used
+only when it actually reduces the size of the packet.
+
+- `TxtFileIo`: Creates, reads, and deletes .txt files with base85 encoding and
 gzip compression to send and receive data.
-
-For more advanced examples, check out [VideoIo](../videoio).
 
 # `GoofyServer`
 
