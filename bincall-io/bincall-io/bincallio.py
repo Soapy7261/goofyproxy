@@ -707,11 +707,16 @@ class BincallIo(GoofyIo):
                     raise ValueError("unsupported connection mode for pickup")
 
             # send and receive
+            time_start = time.time()
             while not self._stopping:
-                time.sleep(
+                interval = (
                     self.interval_min
                     + random.random() * (self.interval_max - self.interval_min)
                 )
+                remaining_time = time_start + interval - time.time()
+                if remaining_time > 0.:
+                    time.sleep(remaining_time)
+                time_start = time.time()
 
                 if self._connection_mode == ConnectionMode.WebSocket:
                     out_data = self._prepare_outgoing_packet()
